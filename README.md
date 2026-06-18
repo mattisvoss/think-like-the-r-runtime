@@ -14,8 +14,6 @@ The rendered book lives at:
 https://mattisvoss.github.io/think-like-the-r-runtime/
 ```
 
-(Replace `mattisvoss` with your own GitHub username once you publish.) A PDF download is linked in the sidebar of the site.
-
 ## Contents
 
 - **Part I: The Machine.** Foundations (memory, pointers, the stack and heap, the CPU)
@@ -40,25 +38,6 @@ The PDF build additionally needs a LaTeX installation, which Quarto can manage:
 ```bash
 quarto install tinytex
 ```
-
-## Publishing to GitHub Pages
-
-A GitHub Action (`.github/workflows/publish.yml`) renders the whole book and deploys it on every push to `main`. To turn it on:
-
-1. Push this repository to GitHub on the `main` branch.
-2. In **Settings → Pages**, set the source to the **`gh-pages`** branch (the first push creates it automatically).
-3. Replace `mattisvoss` in `_quarto.yml` and this README with your own GitHub username.
-
-No R installation is needed in the Action, because the code blocks are not executed.
-
-## Getting it read
-
-For an open book, distribution is the whole point. Some channels that reach R users directly:
-
-- **[R-bloggers](https://www.r-bloggers.com/)** syndicates blog posts to a large R audience; submit your announcement post.
-- The **#rstats** community on Bluesky, Mastodon, and LinkedIn, plus **r/rstats** and the **[Posit Community](https://forum.posit.co/)** forum.
-- **[The Big Book of R](https://www.bigbookofr.com/)**, a catalogue of free R books worth being listed in.
-- A **[Zenodo](https://zenodo.org/)** deposit gives the book a DOI so it can be cited and is archived permanently. The included `CITATION.cff` pairs with this.
 
 ## Repository layout
 
