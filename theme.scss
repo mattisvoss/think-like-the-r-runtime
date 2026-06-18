@@ -1,0 +1,64 @@
+/*-- scss:defaults --*/
+// Editorial palette: warm paper, deep ink, single oxblood accent.
+$body-bg:        #fbf8f1;
+$body-color:     #20201c;
+$link-color:     #7a1f2b;
+$selection-bg:   #f0d9b5;
+
+// Typefaces. Falls back gracefully if web fonts are unavailable.
+$font-family-sans-serif: "Source Sans 3", "Helvetica Neue", Arial, sans-serif;
+$font-family-monospace:  "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+
+$headings-font-weight: 600;
+$code-block-bg:        #f3eee1;
+$code-color:           #7a1f2b;
+
+/*-- scss:rules --*/
+body {
+  font-feature-settings: "liga" 1, "kern" 1;
+}
+
+h1, h2, h3, h4 {
+  letter-spacing: -0.01em;
+}
+
+// Part dividers and chapter titles get a touch of warmth.
+.quarto-title-banner {
+  background-color: #20201c;
+}
+
+// Callout tuning so the four box types read as a coherent family.
+div.callout-note {
+  border-left-color: #2c6e8f;
+}
+div.callout-important {
+  border-left-color: #7a1f2b;
+}
+div.callout-tip {
+  border-left-color: #4a7c3f;
+}
+
+// Code blocks: soft panel, clear monospace, never a black box.
+pre.sourceCode, pre > code.sourceCode {
+  background-color: $code-block-bg;
+  border: 1px solid #ddd3bd;
+  border-radius: 4px;
+}
+
+// Inline code stays subtle.
+code:not(.sourceCode) {
+  background-color: #f3eee1;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+// Sidebar accent.
+.sidebar-item-text a.active {
+  color: #7a1f2b;
+  font-weight: 600;
+}
+
+// Comfortable measure for long-form reading.
+main.content {
+  max-width: 46rem;
+}

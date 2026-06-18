@@ -1,0 +1,61 @@
+---
+title: "Think Like the R Runtime"
+---
+
+# Preface {.unnumbered}
+
+Most R tutorials teach you to *use* functions. This book teaches you to think about what R does when it runs them, all the way down to the numbered boxes of memory the machine is moving numbers between.
+
+If you write any programming language for long enough, you will hit moments when it seems to behave strangely. A function in R captures a variable you thought was local. A reactive expression in a Shiny app fires more often than you expected. A target in a pipeline re-runs when nothing in your data has changed. These are not edge cases. They are the language showing you its underlying machinery, and once you can see that machinery, the strangeness resolves into something you can predict.
+
+This book is a course in how that machinery works, built up in five parts.
+
+**Part I** starts below the language entirely. Before we can say what an R variable *is*, we need to know what a variable is on the physical machine: what memory actually is, what an address is, what a pointer is, and what the processor is doing billions of times per second. This is the foundation that every later idea rests on. If you have a computer science background, you can skim it. If you do not, it is the most important part of the book, because every apparently magical behaviour in R turns out to be a plain consequence of the ideas in this one chapter.
+
+**Part II** builds R's model of names and values on top of that foundation: environments, closures, lazy evaluation, and the call stack. By the end you will understand why `targets` can plan a pipeline before running it, and why a closure can remember a value long after the function that created it has returned.
+
+**Part III** is about organising behaviour: R's object systems (S3, S4, R6) and the reactive programming model that powers Shiny.
+
+**Part IV** is about speed: why some R code is thousands of times faster than other code that computes the same answer, and how the three layers of caching in the R ecosystem are really one idea applied at three timescales.
+
+**Part V** is about the deepest idea in the language: that code is itself data, something a program can inspect, build, and run. It starts with metaprogramming in R generally, the toolkit behind formulas and the tidyverse, and culminates in writing a small working interpreter for R, in R. Building a runtime is the surest way to understand one, and it is where every earlier idea in the book comes together at once.
+
+A short **capstone** then shows every one of these ideas living together inside a single realistic system.
+
+## Who this book is for
+
+This book is written for the statistical and machine learning community: people who reach for R to fit models, build reproducible pipelines, and ship interactive apps, and who would like to understand the tool rather than memorise incantations.
+
+Almost no prior R knowledge is assumed. You should be comfortable with the idea of variables, functions, and lists, and you should be numerate, meaning comfortable with abstraction and willing to follow a careful argument. No background in computer architecture is required: Part I builds it from nothing. No JavaScript knowledge is required either, despite the origin of this book's structure, explained below.
+
+## How to read it
+
+Run the code as you go. Each chapter contains short R programs, and almost every one of them is something you can paste into an R session and try. The code blocks are written to be read, not executed automatically, so that the book builds and renders without needing a particular set of packages installed. Where a program produces output, the expected output is shown as comments. Treat any surprise as an invitation to investigate, which is the entire spirit of the book.
+
+Each chapter ends with a short set of exercises and a summary of what you can now predict. The goal is not to finish the book quickly. The goal is to finish a chapter and feel that you can see what was previously invisible.
+
+::: {.callout-note}
+## A note on the code
+The R programs in this book are written carefully but are meant to be run and explored by you rather than taken as verified test output. If a result surprises you, run it, read the relevant help page, and reason about it using the model this book gives you. That habit, not the memorisation of any individual result, is what the book is trying to build.
+:::
+
+## Acknowledgements and lineage
+
+The structure of this book, its selection of topics and the order in which they build, follows Sumit Saha's course *Think Like the JavaScript Engine*, published on freeCodeCamp in 2026. That course makes a simple and correct argument: you cannot debug, design, or reason about a language by memorising rules, you have to be able to predict what the runtime will do. This book carries that argument over to R.
+
+The mapping between the two languages is faithful. Where JavaScript has scope, R has lexical environments. Where JavaScript has hoisting, R has lazy evaluation. Where JavaScript has prototypes, R has S3, S4, and R6. Where JavaScript has the event loop, R has the reactive graph. In most cases R's version of each idea turns out to be the more interesting one, because R was designed by statisticians who wanted a language they could reason about.
+
+None of the text here is taken from that course; only the pedagogical skeleton is shared, with gratitude.
+
+Part V, on code as data, draws its inspiration from a second source: Abelson and Sussman's *Structure and Interpretation of Computer Programs* (MIT Press), and in particular its idea of teaching a language by building an evaluator for it. The interpreter developed in Chapter 10, and all of the code and prose throughout this book, are original and written for R; what is borrowed from that classic is the pedagogical idea, not its expression. Readers who enjoy Part V should treat *SICP* as the natural place to go deeper.
+
+The two books that go deeper than this course, and that every serious R programmer should eventually read, are Hadley Wickham's *Advanced R* and Norman Matloff's *The Art of R Programming*. Where this book ends, those begin.
+
+## License
+
+This book is free and open source. The prose is licensed under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/) (CC BY 4.0), and the code examples under the [MIT License](https://opensource.org/licenses/MIT). You are free to read it, share it, teach from it, translate it, and build on it, including commercially, as long as you give appropriate credit. See the `LICENSE` and `LICENSE-CODE` files for the full terms.
+
+::: {.callout-tip}
+## The one idea
+If you take only one thing from this book, take this: there is no magic. Every behaviour described in these pages is a consequence of a program, written in C, managing numbered boxes of memory on your behalf. Once you believe that literally, you can derive the rest.
+:::

@@ -1,0 +1,35 @@
+name: Render and Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow the action to push the rendered site to the gh-pages branch.
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Quarto
+        uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          tinytex: true   # needed for the PDF download
+
+      # No R setup step is required: the code blocks in this book are plain
+      # ```r fences and are not executed during the build. If you later make
+      # some chunks executable (```{r}), add an r-lib/actions/setup-r step here
+      # and install the packages those chunks need.
+
+      - name: Render and publish to GitHub Pages
+        uses: quarto-dev/quarto-actions/publish@v2
+        with:
+          target: gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

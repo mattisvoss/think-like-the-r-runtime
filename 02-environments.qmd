@@ -1,0 +1,189 @@
+---
+title: "Where Variables Live"
+---
+
+In the foundations chapter (Chapter 1) we established that a variable is a name in a side-table, mapping a string to an address on the heap. R has a specific name for that side-table. It calls it an **environment**, and it makes environments into real, inspectable objects. This chapter is about what they are and how lookups walk between them. Almost everything later in the book is a consequence of this one mechanism.
+
+## An environment is a side-table with a parent
+
+Recall the picture from the foundations chapter: when you write `x <- 10`, the runtime puts the value 10 in some boxes on the heap and records, in a side-table, that the name `"x"` maps to that location. An environment *is* that side-table. Concretely it is a hash table from names to values (technically to the SEXPs those names are bound to), plus one extra pointer: a link to a **parent** environment.
+
+That parent pointer is the entire trick. When R needs the value of a name and does not find it in the current environment, it follows the parent pointer and looks in the parent, then the parent's parent, and so on. The search stops when the name is found, or when R reaches the topmost environment (the empty environment) and gives up with an error.
+
+```r
+x <- 10
+
+environment()         # the environment you are typing into,
+                      # known as the global environment
+ls(environment())     # list every name bound in it
+get("x", envir = environment())   # retrieve the value bound to "x"
+```
+
+So an environment is two things bolted together: a table of name-to-value bindings, and a pointer to where to look next. Keep that shape in mind. We will see it reused, almost unchanged, as the basis of closures, of R6 objects, and of Shiny's reactive bookkeeping.
+
+## Why one environment is not enough
+
+A useful R session quickly contains many environments, not one. The reason is functions, and it follows directly from the stack-and-heap distinction in the foundations chapter (Chapter 1).
+
+Consider defining and calling a function.
+
+```r
+f <- function(x) {
+  y <- x * 2
+  y + 1
+}
+
+f(3)    # 7
+```
+
+When R runs `f(3)`, it needs somewhere to keep the local names `x` (bound to 3) and `y` (bound to 6). Those names must not collide with any `x` or `y` you happen to have in the console. So R creates a fresh environment for this one call, the call's stack frame from the foundations chapter (Chapter 1), and binds the local names there. The environment lives for the duration of the call and is normally discarded when `f` returns.
+
+But functions also mention names that are not their own arguments.
+
+```r
+scaling_factor <- 0.5
+
+scale <- function(x) x * scaling_factor
+
+scale(10)    # 5
+```
+
+When `scale(10)` runs, R cannot find `scaling_factor` in the function's own call environment. So it follows the parent pointer and looks in a wider environment. This is the second idea the chapter turns on: every environment has a parent, and name lookup walks the chain of parents until the name is found or the chain runs out.
+
+## The search path
+
+Here is the chain that exists during a typical session. Each entry is an environment, and the parent pointers run down the list.
+
+```r
+search()
+# [1] ".GlobalEnv"        "package:stats"
+# [3] "package:graphics"  "package:grDevices"
+# [5] "package:utils"     "package:datasets"
+# [7] "package:methods"   "Autoloads"
+# [9] "package:base"
+```
+
+The chain runs from the global environment, where you type, down to the base environment, where built-in functions like `sum` and `length` live. When you reference a name, R walks this chain in order. This also explains an occasional source of confusion: if two packages both export a function called `select`, the one you loaded *more recently* wins, because `library()` inserts each new package near the front of the chain, ahead of the older one.
+
+::: {.callout-note}
+## Analogy: a chain of dictionaries
+Think of each environment as a dictionary, and the parent pointer as a note at the back saying "if you did not find your word here, try this other dictionary next". To look up a word you start in your own dictionary and keep following the notes outward until you find a definition or run out of dictionaries.
+:::
+
+## Lexical scoping: where a function looks
+
+One subtle question remains, and it is the heart of the chapter. When `scale` needs `scaling_factor`, *whose* parent chain does it walk? There are two candidates. It could walk the chain of the environment where the function was **defined**, or the chain of the environment it was **called from**.
+
+R uses the first. This rule is called **lexical scoping**: every function carries a pointer to the environment in which it was created, and free names (names that are not its arguments) are looked up starting there. The alternative, resolving names from wherever the function happens to be called, is called dynamic scoping, and R rejects it, as do almost all modern languages, because it would make a function's meaning depend on its caller, and reasoning would collapse.
+
+The cleanest demonstration is a function that captures a value that is later changed.
+
+```r
+x <- "global"
+
+make_printer <- function() {
+  x <- "local to make_printer"
+  function() print(x)        # this inner function is
+                              # defined inside make_printer
+}
+
+p <- make_printer()
+x <- "changed in global"
+
+p()
+# [1] "local to make_printer"
+# Not "changed in global", and not "global".
+```
+
+Read that slowly. The inner function does not even exist when `x <- "global"` runs. By the time the inner function is finally called, the line `x <- "changed in global"` has executed. Yet the inner function prints the value of `x` that was in scope *where it was defined*. The function held a pointer to its definition environment, and, exactly as the foundations chapter (Chapter 1) predicted, that pointer kept the environment alive on the heap long after `make_printer` returned and its stack frame was gone. The next chapter, on closures, is entirely about this.
+
+::: {.callout-important}
+## Key idea: a function is body plus environment
+A function's behaviour depends on three things: its arguments, its body, and the environment in which it was defined. Two functions with identical arguments and identical bodies can produce different results because their definition environments differ. This is the single most important fact about R functions, and it is a direct consequence of lexical scoping.
+:::
+
+## Inspecting environments
+
+R lets you look at all of this directly. The `rlang` package provides the most readable tools.
+
+```r
+library(rlang)
+
+f <- function() {
+  a <- 1
+  b <- 2
+  env_print()       # prints this environment and its parent
+}
+f()
+# <environment: 0x...>
+# parent: <environment: global>
+# bindings:
+#   * a: <dbl>
+#   * b: <dbl>
+```
+
+You can also build environments by hand and use them as plain data structures. This is the trick behind R6 classes, behind the cache in `memoise`, behind Shiny's tracking of reactive dependencies, and behind `targets`' record of pipeline state. We will meet all four.
+
+```r
+e <- new.env(parent = emptyenv())
+e$counter <- 0
+e$counter <- e$counter + 1
+ls(e)                # "counter"
+identical(e, e)      # TRUE
+```
+
+## Environments are the one exception to copy-on-modify
+
+That last line points at something important, and it reaches straight back to pointers in the foundations chapter (Chapter 1). Almost every object in R is handled with **copy-on-modify** semantics, which we study properly in Chapter 8: if two names point to the same value and you modify it through one of them, R quietly makes a copy first so the other name is unaffected.
+
+Environments are the single deliberate exception. They are passed and assigned by **reference**, meaning the pointer is shared and never silently copied. If you pass an environment to a function and the function modifies it, the change is visible everywhere, because every name involved is pointing at the very same table on the heap.
+
+```r
+e <- new.env()
+e$value <- 1
+
+bump <- function(env) env$value <- env$value + 1
+
+bump(e)
+e$value    # 2, the change is visible outside the function
+```
+
+This is not a quirk. It is the property that makes environments useful as the storage behind mutable objects. When you want state that several functions can share and change, an environment is the tool, precisely because it is the one thing R will not copy behind your back.
+
+## Why this matters for your work
+
+### For a `targets` pipeline
+
+Every `tar_target(name, command)` wraps `command` as a function, and that function carries a definition environment, usually the environment in which your `_targets.R` file was sourced. If you accidentally leave a large object in that environment (a multi-gigabyte data frame loaded while testing, say), targets that close over it can treat it as part of their dependency footprint and may serialise it to disk. The fix is structural and follows directly from lexical scoping: define your target functions in a separate `R/` directory, sourced into a clean environment, so that the definition environment contains only your helper functions and none of your scratch data.
+
+### For a Shiny app
+
+The `server` function runs once per user session. Every `reactive()`, `observe()`, and `output$...` assignment inside it closes over that session's server environment. This is why a plain `x <- 0` at the top of `server` acts as per-session state, private to one user, while an object created *outside* `server`, in `global.R`, is shared across all sessions: each session's closures walk their parent chain up into the same outer environment and find the one shared copy there. Scope, in other words, is your main tool for deciding what is per-user and what is global.
+
+## What you can now predict
+
+- Why a function can see variables from where it was written, but not from where it is called.
+- Why moving a heavy computation outside a Shiny `server` function shares it across users, while leaving it inside isolates it per user.
+- Why environments, alone among R objects, let a change made in one place be seen in another.
+- Why a pipeline tool can accidentally drag a large object into a target, and how scope discipline prevents it.
+
+## Exercises
+
+1. Without running it, predict what each of the three `cat()` calls below prints. Then run it and explain any surprise using the side-table picture from this chapter.
+
+    ```r
+    x <- 1
+    f <- function() {
+      cat(x, "\n")
+      x <- 2
+      cat(x, "\n")
+    }
+    f()
+    cat(x, "\n")
+    ```
+
+2. Use `new.env()`, `assign()`, and `get()` to build a tiny key-value store. Make it reject re-assignment to a key that already exists. You will not need any package.
+
+3. Write `parent_chain(env)`, returning a list of all ancestor environments of `env`, ending at the empty environment. Test it on the global environment, then run `library(dplyr)` and test again. What changed in the chain, and where?
+
+4. Demonstrate the reference behaviour of environments. Create an environment, pass it to two different functions that each modify it, and confirm that both changes are visible afterward. Then do the "same" thing with a list and explain why the list does not behave the same way.

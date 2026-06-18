@@ -1,0 +1,174 @@
+---
+title: "What the Machine Is Actually Doing"
+---
+
+Before we can talk about how R organises your variables, we have to talk about what a variable physically *is*. Not as a metaphor, but as an arrangement of electrical switches in a chip. This chapter builds, from the level of a single switch up to the R interpreter, the substrate that every later idea in this book rests on.
+
+The payoff is concrete. By the end of this chapter you will be able to answer, from first principles, questions that otherwise have to be memorised:
+
+- Why does assigning `y <- x` sometimes copy a million numbers and sometimes copy nothing at all?
+- Why do R environments behave differently from every other object in the language?
+- Why is a loop that grows a vector thousands of times slower than one that does not, even though both compute the same answer?
+- How can a function "remember" a value long after the call that created it has finished?
+
+Every one of these has the same kind of answer, and that answer lives here.
+
+## Everything is switches
+
+At the very bottom, a computer is an enormous collection of switches, each of which is either on or off. We write "on" as `1` and "off" as `0`. One such switch is a **bit**.
+
+A single bit is not much. It can record one yes-or-no fact: true or false, present or absent. But bits combine. Put eight of them in a row and you get a **byte**, which can take any of $2^8 = 256$ distinct patterns, from `00000000` to `11111111`. If we agree to read those patterns as numbers, a byte can hold any whole number from 0 to 255. Now we can count.
+
+Everything else is built by agreement on top of this. A number larger than 255 does not fit in one byte, so we use several together: four bytes give $2^{32}$, about 4.3 billion patterns, enough for most counting. Text is bytes too. By a near-universal agreement called ASCII, the letter `A` is the number 65, which is the byte `01000001`. A decimal value like `3.14` is stored using another agreement (a format called IEEE 754) spread across eight bytes.
+
+Here is where intuition usually goes wrong: **a byte does not know what it means.** The pattern `01000001` is the number 65, and the letter `A`, and part of some larger number, all at once. Meaning comes entirely from how a program chooses to interpret the pattern. The bytes are mute. The program supplies the interpretation.
+
+::: {.callout-note}
+## Analogy: a wall of light switches
+Picture a wall covered in millions of light switches. At any instant the wall is in some configuration of on and off. That configuration *is* the computer's current state. Computing is nothing more than rules for flipping switches based on the current pattern of switches. Everything that follows, every number, every model, every Shiny app, is a very elaborate story we tell about which switches are on.
+:::
+
+## Memory is a street of numbered boxes
+
+Now the single most useful mental model in this book.
+
+Imagine a very long street. Along one side, in order, stands a row of identical small boxes. Each box holds exactly one byte. Each box has a number painted on its front: the first box is box 0, the next is box 1, then box 2, and so on, up into the billions. That painted number is the box's **address**.
+
+This street is your computer's memory, its RAM. That is, almost literally, all that RAM is: a vast, ordered array of byte-sized boxes, each one individually reachable by its address.
+
+When a program wants to store a value, it does two things. It picks one or more boxes, and it writes the bytes of the value into them. To retrieve the value later, it has to know *which* boxes, which means it has to know the address.
+
+Here is the first deep idea of the book.
+
+::: {.callout-important}
+## Key idea: a variable is a name in a side-table
+The machine has no notion of the name `x`. What physically exists is a value sitting in some boxes, plus an address that tells you where those boxes are. A "variable" is a human convenience: a label that the programming language keeps in a separate lookup table, mapping the name `x` to the address where `x`'s value lives.
+:::
+
+Hold onto that, because in the next chapter we will discover that R's **environments** are exactly such lookup tables, and that single fact is the whole secret behind how scope works.
+
+Let us make it concrete. Suppose somewhere inside a running R session the following happens.
+
+```r
+x <- 10
+```
+
+Underneath, the runtime does roughly this. It finds some free boxes on the street, say starting at address `4096`, and writes the bytes representing the number 10 into them. Then, in a side-table for the current scope, it records an entry: the name `"x"` maps to address `4096`. When you later write `x + 5`, the runtime looks up `"x"` in the side-table, gets the address `4096`, reads the bytes there, interprets them as the number 10, and adds 5.
+
+You never see the address. The whole point of a programming language is to let you say `x` and not `4096`. But the address is what is really there, and several of R's most confusing behaviours become obvious the moment you remember that names and addresses are two different things.
+
+## A pointer is a value that is an address
+
+Since an address is just a number, and a box can hold a number, a box can hold an *address*. A box whose contents are the address of another box is called a **pointer**. We say the first box "points to" the second.
+
+::: {.callout-note}
+## Analogy: a sticky note with a locker number
+A pointer is like a sticky note that reads "the thing you want is in locker 4,815". The note is small and cheap to carry around and copy. The contents of the locker might be huge. If I hand you a copy of the note, we are now both looking at the same locker. Neither of us has copied what is inside it. We have only copied the note.
+:::
+
+This sounds almost too simple to be important. It is, in fact, one of the most powerful ideas in all of computing, and it is the key to three things that confuse nearly every R programmer:
+
+1. Why `y <- x` sometimes copies data and sometimes does not. (Chapter 8: it copies the note, not the locker, until someone needs to change the contents.)
+2. Why environments behave unlike every other R object. (Chapter 2: an environment is handled through a pointer that is never silently copied.)
+3. How a single R list can hold a number, a data frame, and a function all at once. (The list does not contain those things; it contains pointers to them, and a pointer is the same small size no matter how large the thing it points to.)
+
+Picture two names, `x` and `y`, after `y <- x`. There is one value on the heap, and two pointers aimed at it.
+
+```
+ name table          memory (the heap)
+ ----------          ----------------
+   x  ----------\
+                 >----->  [ the vector 1, 2, 3, ... ]
+   y  ----------/
+```
+
+Copying `y <- x` did not duplicate the vector. It duplicated the arrow. This picture, and what must happen to it when someone tries to change the vector through `y`, is the entire content of "copy-on-modify", which we reach in Chapter 8.
+
+## Two neighbourhoods: the stack and the heap
+
+Programs do not treat memory as one undifferentiated street. They carve it into regions with different rules. Two of those regions matter for everything that follows.
+
+The **stack** is the region used for the short-lived bookkeeping of function calls. It behaves exactly like a stack of plates: you may add a plate to the top, or remove the plate from the top, and nothing else. When a function is called, the program pushes a fresh plate, called a **stack frame**, onto the top. That frame holds the call's local variables and, importantly, the address to jump back to when the function finishes. When the function returns, its frame is popped off the top and instantly forgotten. The stack is fast and fully automatic, but its discipline is strict: a function's frame vanishes the moment the function returns.
+
+The **heap** is the region for values that need to outlive the function call that created them, or that are too large, or whose size is not known in advance. Getting a box from the heap takes more work than pushing onto the stack, and something has to decide when a heap box is no longer needed and may be reused. In low-level languages the programmer makes that decision by hand. In R, a part of the runtime called the **garbage collector** does it automatically, reclaiming any heap memory that nothing points to any more.
+
+This split pays off twice later in the book, so it is worth fixing now.
+
+::: {.callout-important}
+## Key idea: the stack is temporary, the heap persists
+Local bookkeeping for a function call lives on the stack and dies when the call returns. The actual data your program works with lives on the heap and survives as long as something points to it. Closures (Chapter 3) work precisely because R can keep an environment alive on the heap after the stack frame that created it is long gone. The "call stack" you inspect after an error (Chapter 5) is, quite literally, this stack of frames.
+:::
+
+::: {.callout-note}
+## Analogy: scratch paper and a filing cabinet
+The stack is a pad of scratch paper. For each task you tear off a fresh sheet, jot down what you need while working, and throw the sheet away the instant the task is done. The heap is a filing cabinet. You put things there when they need to outlast the current task, and a clerk (the garbage collector) periodically removes any file that no sticky note still refers to.
+:::
+
+## The processor: a fast, literal clerk
+
+So far we have memory, but nothing that acts. The actor is the **CPU**, the central processing unit.
+
+The CPU does astonishingly little, astonishingly fast. In a tight loop, billions of times per second, it does three things: it **fetches** the next instruction from memory, **decodes** what that instruction means, and **executes** it. Then it does it again.
+
+The instructions it understands are tiny and utterly concrete. There is no instruction for "fit a regression". The instructions are more like "load the bytes at address A into register 3", "add register 3 and register 4 and put the result in register 5", and "if register 5 is zero, jump to the instruction at address B". Everything your computer does, every model fit and every web page, is a tower of abstractions resting on billions of these minuscule steps.
+
+**Registers** are the handful, a few dozen, of tiny storage slots physically inside the CPU. They are the only places the CPU can actually do arithmetic. To add two numbers that live in memory, the CPU must first load each into a register, add the registers, and store the result back out to memory. Registers are blindingly fast precisely because there are so few of them and they sit right on the chip.
+
+::: {.callout-note}
+## Analogy: a clerk with a tiny desk
+Imagine an immensely fast clerk working at a tiny desk in a colossal warehouse (memory). The desk has room for only a few items at a time (the registers). To combine two items stored deep in the warehouse, the clerk must walk out, fetch each one to the desk, do the work at the desk, and carry the result back to a shelf. The clerk is so fast that the walking, not the thinking, is what takes the time. Keep that image: in modern computers, moving data is usually the expensive part, not computing on it.
+:::
+
+## The memory hierarchy, and why nearness is speed
+
+That last analogy points at the most important performance fact in modern computing. There is a cruel trade-off in hardware: memory that is fast is also small and expensive, while memory that is large is slow and cheap. No single kind of memory is both big and fast. So computers stack several kinds into a **hierarchy**, fastest and smallest at the top:
+
+- **Registers**: a few dozen slots, inside the CPU, access in well under a nanosecond.
+- **Cache** (levels L1, L2, L3): kilobytes to a few megabytes, very near the CPU, a few nanoseconds.
+- **Main memory** (RAM): gigabytes, around 100 nanoseconds, which is roughly a hundred times slower than cache.
+- **Disk or SSD**: terabytes, microseconds to milliseconds, dramatically slower again.
+
+When the CPU needs a byte, it first checks the nearest cache. If the byte is there (a cache **hit**), wonderful. If not (a cache **miss**), it must go to a slower level, which can be a hundred times the wait. And here is the detail that drives a great deal of real-world performance: when the CPU fetches one byte from RAM, it does not fetch just that byte. It grabs a whole neighbouring chunk, called a **cache line**, typically 64 bytes, on the bet that you will very soon want the bytes sitting right next door.
+
+That bet is the physical reason that walking through data laid out *contiguously* in memory is far faster than chasing pointers scattered across the heap. With contiguous data, every expensive trip to RAM brings back 64 useful bytes at once. With scattered pointers, each trip may bring back 63 bytes you do not want. We bank this insight now and cash it in Chapter 8, where it explains why R's vectorised operations are fast and its pointer-chasing patterns are slow.
+
+::: {.callout-important}
+## Key idea: locality is speed
+Data that sits together is processed together, quickly. Data that is scattered forces the processor to wait on memory again and again. A surprising amount of "make it faster" in numerical computing is really "make the data contiguous so the cache bet pays off".
+:::
+
+## What R adds: an interpreter is just a program
+
+We now have enough to say precisely what R *is*.
+
+R is a program, written mostly in the C language, that runs on the machine we have just described. When you type R code, you are not speaking to the CPU directly. You are handing text to the **R interpreter**, a C program that reads your code and, on your behalf, performs the corresponding manipulations of memory: allocating boxes on the heap, writing values into them, recording names and addresses in side-tables, and orchestrating the CPU to do the arithmetic.
+
+Every R value you create is, underneath, a C structure living on the heap. R's internals call these structures **SEXPs** (short for S-expressions). A SEXP carries a small header (what type is this: an integer vector? a list? a function? and some bookkeeping, including a count of how many things point to it, which we will need in Chapter 8) followed by either the data itself or a pointer to it.
+
+An R **environment**, the protagonist of the next chapter, is one particular kind of SEXP. In essence it is a hash table mapping names to the SEXPs they are bound to, together with a pointer to a parent environment. Read that sentence again, because once you believe it literally, the entire behaviour of scope, closures, and reference semantics stops being a list of rules and becomes a set of consequences you can derive on your own.
+
+::: {.callout-important}
+## Key idea: there is no magic
+Everything in the rest of this book is a consequence of a C program managing numbered boxes of memory for you. When R surprises you, the explanation is never magic. It is always a fact about names, addresses, pointers, the stack, the heap, or the cache, and you now know all six.
+:::
+
+## What you can now predict
+
+You have not written any "real" R yet, but you can already reason about it. With only the ideas in this chapter, you should be able to explain, at least in outline:
+
+- Why two variables can refer to the same underlying data, and what copying really copies.
+- Why some things a function creates disappear when it returns, while others survive.
+- Why the *layout* of your data in memory can matter as much as the algorithm.
+- Why an interpreted language like R can be slow in a loop yet fast on a whole vector at once.
+
+Each of these becomes a precise, mechanical story in the chapters ahead. We begin with the side-table that maps names to values: the environment.
+
+## Exercises
+
+1. In your own words, explain the difference between a name, an address, and a value. Use the locker analogy, then restate it without any analogy at all.
+
+2. Suppose `a` is a vector of one million numbers and you write `b <- a`. Before reading Chapter 8, predict what is copied at that moment: the million numbers, or something much smaller? Justify your answer using only the pointer picture from this chapter.
+
+3. A function creates a local counter, increments it, and returns. Using the stack-and-heap distinction, explain why that counter would normally be gone after the function returns, and sketch what would have to be true for it to survive. (You are predicting the mechanism behind closures, which is Chapter 3.)
+
+4. Explain, using the cache-line idea, why summing the elements of one contiguous vector of a million numbers can be much faster than summing a million numbers each stored in a separate object linked by pointers, even though the count of additions is identical.

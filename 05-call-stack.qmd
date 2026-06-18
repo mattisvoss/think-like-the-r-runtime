@@ -1,0 +1,117 @@
+---
+title: "The Call Stack"
+---
+
+In Chapter 1 we met the stack: a region of memory that grows by a frame when a function is called and shrinks when it returns. R exposes that stack to you. You can read the chain of in-flight calls, inspect the local variables of any frame, and intercept errors and warnings as they travel up it. This chapter is about that machinery and the surprisingly powerful condition system built on top of it.
+
+## Two notions of parent
+
+We have to separate two things the earlier chapters quietly let blur together. Every running function has two relevant environments, and confusing them causes a whole category of advanced R bugs.
+
+The **definition environment**, also called the lexical parent, is where the function was *created*. Closures capture this. It is what governs how free names are resolved, by the rules of Chapter 2. You reach it with `environment(f)`.
+
+The **calling environment**, also called the parent frame, is the environment that contained the expression that *invoked* the function. It is a fact about this particular call, not about the function. You reach it with `parent.frame()`.
+
+```r
+show_parents <- function() {
+  list(
+    definition = environmentName(environment(show_parents)),
+    calling    = environmentName(parent.frame())
+  )
+}
+
+g <- function() show_parents()
+g()
+```
+
+Most ordinary code only ever needs the definition environment, because lexical scoping is what resolves names. The calling environment is the tool you reach for when writing *infrastructure*: code whose job is to inspect or act on its caller. Error handlers, debugging utilities, and the non-standard-evaluation helpers inside `dplyr` all use it. If you are not writing that kind of code, you can mostly forget `parent.frame()` exists, but knowing the distinction is what lets you read other people's infrastructure code.
+
+::: {.callout-note}
+## Analogy: who wrote me versus who sent me
+The definition environment is your birthplace: where you were written, fixed forever. The calling environment is the return address on the envelope of whoever just sent you a task: different every time you are called. Lexical scoping says you look up words in the dictionary of your birthplace, not the dictionary of whoever sent the envelope.
+:::
+
+## Inspecting the stack at runtime
+
+When a function calls another, which calls another, R keeps a stack of all the in-flight calls, exactly the stack of frames from Chapter 1. You can read it at any moment.
+
+```r
+deep <- function() {
+  print(sys.calls())     # every call currently on the stack
+  print(sys.frames())    # the matching environments
+}
+
+a <- function() b()
+b <- function() c()
+c <- function() deep()
+
+a()
+# [[1]] a()
+# [[2]] b()
+# [[3]] c()
+# [[4]] deep()
+```
+
+This is the same machinery that powers `traceback()` after an error, `debug()` for stepping into a function, and `browser()` for pausing execution to inspect any frame's local variables. The call stack is not a sealed box. It is a list you can walk, which is why R's debugging tools can be written in R itself.
+
+::: {.callout-important}
+## Key idea: the stack is data, so the tools are just code
+Because the call stack is an ordinary list you can read while a program runs, everything built on top of it is ordinary R reading that list. `traceback`, `browser`, and the entire condition system below are not privileged machinery baked into the language; they are programs that walk the stack. A runtime that lets you see its own bookkeeping is a runtime you can extend in its own terms, which is a theme we will take to its conclusion when we build an evaluator in Chapter 10.
+:::
+
+## Conditions: errors, warnings, and messages
+
+R has an unusually well-designed system for signalling and handling exceptional situations, and it is poorly known. It is built on the same stack-walking machinery, and it rewards learning, especially for anyone building pipelines that must not fall over at the first problem.
+
+Two functions carry most of the weight, and the difference between them is the whole point.
+
+**`tryCatch()`** catches a condition and *unwinds* the stack: execution leaps out of all the intermediate frames and resumes after the `tryCatch` call. Use it when you want to abandon the failed work and recover.
+
+**`withCallingHandlers()`** runs your handler *without* unwinding the stack. The original computation is still sitting there, paused, and can be resumed. Use it when you want a side effect, such as logging, without abandoning the work in progress.
+
+```r
+safe_fit <- function(model_fn, data) {
+  withCallingHandlers(
+    model_fn(data),
+    warning = function(w) {
+      cat("Warning during fit:", conditionMessage(w), "\n")
+      invokeRestart("muffleWarning")
+    },
+    error = function(e) {
+      cat("Error during fit:", conditionMessage(e), "\n")
+    }
+  )
+}
+```
+
+For pipelines this distinction is not academic. `tar_make()` uses calling handlers internally so that a failure in one target is logged and recorded, and the pipeline carries on with the targets that do not depend on the one that failed. Wholesale unwinding, the `tryCatch` behaviour, would throw away work that had nothing to do with the failure. Choosing the right handler is choosing whether a single failure is local or fatal.
+
+::: {.callout-note}
+## Analogy: a fire alarm with two settings
+`tryCatch` is a fire alarm that evacuates the whole building: everyone drops what they are doing and leaves by the nearest exit (the stack unwinds). `withCallingHandlers` is an alarm that merely sends a note to the front desk: the note is logged, perhaps an action is taken, and everyone keeps working. Pipelines usually want the second for individual task failures and the first only for genuinely unrecoverable problems.
+:::
+
+## Why R has no tail-call optimisation
+
+A note for readers coming from a functional-programming background. R does not optimise tail calls. A function that recurses very deeply will exhaust the C stack and stop with `Error: C stack usage is too close to the limit`.
+
+There are two reasons, and both connect to earlier chapters. First, lazy evaluation (Chapter 4) muddies the very notion of a tail call: a call that looks like it is in tail position may still have to force pending promises after it returns, so the frame cannot simply be discarded. Second, R is built to let you introspect its own stack at any point, as we did above, and quietly folding away frames to save space would break that introspection.
+
+The practical advice is short. Do not use recursion for deep iteration in R. Use `Reduce()`, `purrr::reduce()`, or a plain loop, all of which run in constant stack space. Recursion is still fine for genuinely tree-shaped problems of bounded depth, such as walking a parse tree or a small nested list, where the depth is small and the recursive shape mirrors the data.
+
+## What you can now predict
+
+- Why a function resolves its variable names by where it was written, but can still discover where it was called from when it needs to.
+- Why R can offer rich debugging tools written in R itself.
+- Why a well-built pipeline can survive a failure in one stage, and which handler makes that possible.
+- Why deep recursion blows up in R when it would be fine in some other languages.
+
+## Exercises
+
+1. Write `caller_says()`, a function that, when called from inside another function, deparses and prints the expression the *caller's caller* wrote when invoking the caller. You will need `sys.call(-1)`.
+
+2. Using `withCallingHandlers()`, write `with_logging(f)`, a wrapper that appends every warning emitted by `f` to a log file but lets `f` run to completion normally.
+
+3. Read the help pages for `tryCatch()` and `withCallingHandlers()` alongside this chapter, then write one paragraph, in your own words, on the difference between unwinding and calling handlers, with one example where you would actively prefer each.
+
+4. Write a recursive factorial and call it with a large enough argument to hit the stack limit. Then rewrite it with `Reduce()` and confirm the limit is gone. Explain, using Chapter 1, what changed about the memory the two versions use.

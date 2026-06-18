@@ -1,0 +1,157 @@
+---
+title: "Lazy Evaluation and Promises"
+---
+
+In R, function arguments are not evaluated when you pass them. They are wrapped in a small object, parked, and evaluated later, only if and when they are actually used. This is the single deepest feature separating R from almost every mainstream language, and it is the mechanism that lets `dplyr` understand `filter(df, x > 3)` and lets `targets` plan a pipeline before running a line of it.
+
+## A surprising experiment
+
+Start with a function whose argument announces when it is evaluated.
+
+```r
+noisy <- function(label) {
+  cat("evaluating", label, "\n")
+  label
+}
+
+f <- function(a, b) {
+  cat("entered f\n")
+  cat("about to use a\n")
+  a
+  cat("about to use b\n")
+  b
+}
+
+f(noisy("A"), noisy("B"))
+# entered f
+# about to use a
+# evaluating A
+# about to use b
+# evaluating B
+# [1] "B"
+```
+
+Read the output carefully. `entered f` prints *before* either argument is evaluated, even though `noisy("A")` and `noisy("B")` are written right there in the call. Each argument is evaluated only at the moment its name is first used inside the body. That is lazy evaluation, and once you have seen it you cannot unsee it.
+
+## The mechanism: promises
+
+When R prepares to call a function, it does not evaluate the arguments and then enter the function. Instead, for each argument, it creates a small object called a **promise**. Building on Chapter 1, a promise is a structure on the heap holding three things: the original unevaluated expression, a pointer to the environment where that expression should eventually be evaluated (the calling environment), and an empty slot for the resulting value.
+
+When the body first uses the argument by name, the promise is **forced**: its expression is evaluated in the stored environment, the result is written into the value slot, and from then on the promise behaves like a plain value. Forcing happens at most once. Ask for the argument ten times and the expression runs once; the other nine reads return the cached value.
+
+::: {.callout-note}
+## Analogy: an IOU
+A promise is an IOU. When you call a function, you do not hand it the goods, you hand it a note describing where to get them and the address to fetch them from. The function only redeems the note if it actually needs the goods. If it never looks, the goods are never fetched, which is why an unused argument that would have thrown an error often causes no error at all.
+:::
+
+## Consequences you can rely on
+
+### Default arguments can refer to other arguments
+
+Because defaults are themselves promises, evaluated inside the function's own environment when first used, a default can depend on another argument.
+
+```r
+f <- function(x, y = x * 2) x + y
+
+f(3)        # 9, because y defaults to x * 2 = 6
+f(3, 10)    # 13, because y is supplied
+```
+
+The default `x * 2` is not computed when the function is defined. It is a parked expression that is evaluated, if needed, inside the call, where `x` is in scope.
+
+### You can capture the expression, not just the value
+
+R lets you reach into a promise and pull out the unevaluated expression. The built-in primitive is `substitute()`.
+
+```r
+inspect <- function(x) {
+  expr <- substitute(x)               # the unevaluated expression
+  cat("Expression:", deparse(expr), "\n")
+  cat("Value:     ", eval(expr), "\n")
+}
+
+a <- 5
+inspect(a + 7)
+# Expression: a + 7
+# Value:      12
+```
+
+This is the foundation of what R calls **non-standard evaluation**. When `dplyr::filter(df, x > 3)` works even though there is no `x` defined in your console, it works because `filter` grabs the unevaluated expression `x > 3` from its promise, looks inside it, and evaluates it in the data frame's environment, where `x` is the name of a column, instead of in your console's environment. The promise carried both the expression and a choice of where to run it, and `filter` overrode the where.
+
+## Quosures: a friendlier interface
+
+The `rlang` package wraps promises in a tidier, first-class object called a **quosure**: an expression bundled with the environment it came from. Promises are an internal mechanism that R uses as it runs. Quosures are objects you can store in a variable, pass to other functions, modify, and evaluate on demand.
+
+```r
+library(rlang)
+
+capture <- function(x) {
+  q <- enquo(x)                              # capture as a quosure
+  cat("Expression: ", deparse(get_expr(q)), "\n")
+  cat("Environment:", environmentName(get_env(q)), "\n")
+  eval_tidy(q)
+}
+
+a <- 5
+capture(a + 7)
+```
+
+If you have ever written a helper like the following and wondered what the curly braces do, here is the answer.
+
+```r
+my_summary <- function(data, group_col) {
+  data |>
+    dplyr::group_by({{ group_col }}) |>
+    dplyr::summarise(n = dplyr::n())
+}
+```
+
+`{{ group_col }}` is shorthand for "capture the unevaluated expression the caller passed for `group_col`, and splice it into the `group_by` call". Without lazy evaluation and quosures this could not work: by the time `group_by` received the argument, R would have already tried to evaluate `group_col` as an ordinary variable, found nothing, and stopped with an error. The whole tidyverse style of naming columns without quotes rests on the promise mechanism in this chapter.
+
+## How `targets` builds its graph
+
+This is the chapter where `targets` stops being magic. Consider a typical pipeline definition.
+
+```r
+list(
+  tar_target(raw,   read_csv("data.csv")),
+  tar_target(clean, clean_fn(raw)),
+  tar_target(model, fit(clean))
+)
+```
+
+The second argument of each `tar_target()` is a promise. `targets` does not evaluate these promises when you call `tar_target()`. Instead it captures the unevaluated expressions, the same move as `substitute()`, and walks each expression with `codetools::findGlobals()` to discover which other names it mentions. From those references it builds a directed graph. The edges `raw -> clean` and `clean -> model` are inferred at this stage, purely by parsing unevaluated code. No data has been read and no model has been fitted.
+
+Only when you later run `tar_make()` are the promises forced, and even then only in dependency order, and only for targets whose stored hash no longer matches. Every part of this story rests on lazy evaluation. Without it, the pipeline would have to run in order to be planned, which would defeat the entire purpose of planning.
+
+::: {.callout-important}
+## Key idea: code as data
+Lazy evaluation lets R treat a piece of code as *data* before deciding whether, where, or even whether at all to run it. `dplyr` inspects the code to choose where to evaluate it. `targets` inspects the code to build a graph and decide what to skip. This ability to look at code before running it is what people mean when they call R a language well suited to metaprogramming.
+:::
+
+## Why this matters for Shiny
+
+A `reactive()` expression is, mechanically, a stored promise that can be forced more than once. The block of code you pass to `reactive()` is captured unevaluated; it is forced only when something downstream asks for its value, and it is re-forced when its inputs have changed. The `isolate()` function is a controlled forcing: it evaluates a reactive's expression without registering a dependency, so the surrounding reactive context does not get told to update when that value later changes. Chapter 7 takes this apart in detail. For now, notice that "a parked computation, evaluated on demand" is the same idea you met as `memoise` in Chapter 3 and will meet again as the reactive graph.
+
+## What you can now predict
+
+- Why an argument that looks like it should error sometimes causes no error, if the function never uses it.
+- Why a default argument can be written in terms of another argument.
+- Why `dplyr` and friends let you name columns without quotes, and what would break without lazy evaluation.
+- Why `targets` can draw and prune a dependency graph before running any of the work.
+
+## Exercises
+
+1. Write `describe_call(x)` that returns a string containing both the unevaluated expression the caller passed and its evaluated value. Use `substitute()`, `deparse()`, and `eval()`. Test it with `describe_call(mean(1:10))`.
+
+2. Build a tiny version of `targets`. Write `graph(...)` that accepts named expressions like `graph(a = 1 + 1, b = a * 2)`, builds a dependency graph by inspecting the unevaluated expressions, and returns the targets in dependency order. Hint: `substitute()` on the `...` and `codetools::findGlobals()` on each expression.
+
+3. Explain, in terms of promises and the environment each promise carries, why this prints 3 and not 1.
+
+    ```r
+    x <- 1
+    f <- function(y = x) { x <- 3; y }
+    f()
+    ```
+
+4. Write a function that takes an argument but never uses it, and pass it `stop("boom")`. Explain why no error occurs. Then add a single line to the function that makes the error appear, and explain precisely what that line did to the promise.

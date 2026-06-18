@@ -1,0 +1,73 @@
+project:
+  type: book
+  output-dir: _book
+
+book:
+  title: "Think Like the R Runtime"
+  subtitle: "A first-principles course in how R actually works, for the statistical and ML community"
+  author:
+    - name: "Mattis Voss"
+  date: last-modified
+  search: true
+  repo-url: "https://github.com/mattisvoss/think-like-the-r-runtime"
+  repo-branch: main
+  repo-actions: [issue]
+  downloads: [pdf]
+  sharing: [twitter, linkedin]
+  page-footer:
+    left: "© 2026 Mattis Voss. Prose CC BY 4.0, code MIT."
+    right: "Built with [Quarto](https://quarto.org)."
+  sidebar:
+    style: docked
+    collapse-level: 1
+  chapters:
+    - index.qmd
+    - part: "Part I: The Machine"
+      chapters:
+        - 01-foundations.qmd
+    - part: "Part II: Names and Values"
+      chapters:
+        - 02-environments.qmd
+        - 03-closures.qmd
+        - 04-lazy-evaluation.qmd
+        - 05-call-stack.qmd
+    - part: "Part III: Organising Behaviour"
+      chapters:
+        - 06-object-systems.qmd
+        - 07-reactivity.qmd
+    - part: "Part IV: Making It Fast"
+      chapters:
+        - 08-performance.qmd
+    - part: "Part V: Code as Data"
+      chapters:
+        - 09-metaprogramming.qmd
+        - 10-metacircular-evaluator.qmd
+    - 11-capstone.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    theme:
+      - cosmo
+      - theme.scss
+    code-copy: true
+    code-overflow: wrap
+    toc: true
+    toc-depth: 2
+    fontsize: 1.05rem
+    linkcolor: "#7a1f2b"
+  pdf:
+    documentclass: scrbook
+    papersize: a4
+    fontsize: 11pt
+    geometry:
+      - top=25mm
+      - bottom=25mm
+      - inner=28mm
+      - outer=22mm
+    colorlinks: true
+    linkcolor: "MidnightBlue"
+    include-in-header: tex/preamble.tex
+    toc: true
+    toc-depth: 1

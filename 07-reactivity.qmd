@@ -1,0 +1,115 @@
+---
+title: "Reactivity"
+---
+
+A Shiny app feels alive: change a slider and a plot redraws, and you never wrote the code that connected them. That feeling is produced by the **reactive graph**, a network of dependencies through which invalidation signals flow. It is the R counterpart of the event loop in a browser, and it is built from the closures and lazy evaluation you already understand. Once you can see the graph, Shiny stops being mysterious and starts being predictable.
+
+## The problem reactivity solves
+
+Imagine wiring a small app by hand. Two numeric inputs, one output showing their sum. You could write: when input A changes, recompute the sum; when input B changes, recompute the sum. That works for two inputs and one output.
+
+It does not survive a real application. A real app has dozens of inputs, intermediate computations that depend on each other (cleaning depends on the raw data, the model depends on the cleaning, three tables depend on the model), and outputs that depend on those. Wire it by hand and every time you add or rename an input you must hunt down every handler that touches it and edit them all. You will miss one.
+
+Reactivity inverts the responsibility. Instead of saying "when A changes, recompute the sum", you *declare* "the sum is whatever A plus B currently is", and the system works out when and how to recompute it. To do that, it builds a graph of who depends on whom and pushes invalidation signals through it.
+
+::: {.callout-note}
+## Analogy: a spreadsheet
+A spreadsheet is the purest reactive system most people have used. You write `=A1+B1` in a cell. You never write "when A1 changes, update this cell". The spreadsheet knows the dependency because it read your formula, and it updates the cell whenever A1 or B1 changes. Shiny is a spreadsheet for arbitrary R computations, and the rest of this chapter is how the spreadsheet knows.
+:::
+
+## The three kinds of node
+
+Every node in a reactive graph plays one of three roles.
+
+**Sources** are the roots. They bring values in from outside the reactive system. The familiar one is `input$something`, carrying values from the browser. Others include `reactiveVal()`, which holds a mutable value you set from code, and `reactivePoll()`, which checks an external resource on a timer.
+
+**Conductors** are interior nodes. A `reactive()` is a conductor: it depends on other nodes and can be depended on in turn. A conductor caches its last computed value and recomputes only when that cache has been invalidated. This is the `memoise` closure from Chapter 3, now with automatic invalidation.
+
+**Endpoints** are the leaves. They exist for their side effects. The two kinds are `observe()`, which runs purely for effect, and `output$something` assignments, whose effect is to update the browser.
+
+## How a dependency is registered
+
+Here is the part that feels like magic until you see it, and it is built entirely from Chapter 4's promises. When the body of a reactive expression runs and reads `input$x`, two things happen at once. First, the current value of `input$x` is returned. Second, the reactive context that is currently running registers itself in `input$x`'s list of dependents.
+
+From then on, whenever `input$x` changes, it walks its list of dependents and sends each one an **invalidation signal**. The dependents mark themselves invalid but do not recompute immediately. They wait until something actually asks for their value (a conductor) or until the next flush of the event loop (an observer).
+
+```r
+library(shiny)
+
+ui <- fluidPage(
+  numericInput("x", "x:", 1),
+  numericInput("y", "y:", 1),
+  textOutput("sum")
+)
+
+server <- function(input, output) {
+
+  total <- reactive({
+    cat("computing total\n")
+    input$x + input$y         # reading these registers dependencies on both
+  })
+
+  output$sum <- renderText({
+    cat("rendering sum\n")
+    paste("Sum:", total())    # reading total() registers a dependency on it
+  })
+
+  observe({
+    cat("observed:", total(), "\n")   # also depends on total
+  })
+}
+```
+
+Draw the graph. `input$x` and `input$y` are sources. `total` is a conductor depending on both. `output$sum` and the `observe()` are endpoints, both depending on `total`. Change `input$x` and it invalidates `total`, which invalidates both endpoints. The body of `total` runs exactly once, and its cached value is reused by both consumers. That caching is precisely the closure-plus-table pattern from Chapter 3, and the reason `total` runs once rather than twice is the whole reason conductors exist.
+
+::: {.callout-important}
+## Key idea: reading is subscribing
+In a reactive context, reading a value is the same act as subscribing to it. You never write the subscription separately, which is exactly why the code reads like a plain formula. The dependency edge is created as a side effect of evaluating the expression, which is only possible because the expression is a lazily evaluated promise that runs inside a context that is watching what it touches.
+:::
+
+## Stopping propagation: `isolate()`
+
+`isolate()` reads a reactive value *without* registering a dependency. It is the equivalent of `event.stopPropagation()` in the browser. Use it to consume a current value without being notified of future changes.
+
+```r
+observe({
+  trigger   <- input$go_button       # depend on the button
+  current_x <- isolate(input$x)      # read x WITHOUT depending on it
+  cat("Snapshot of x at button press:", current_x, "\n")
+})
+```
+
+This is the canonical "take a snapshot when X happens" pattern. The convenience wrappers `eventReactive()` and `observeEvent()` are sugar over exactly this combination of depending on one thing and isolating another.
+
+## The flush cycle
+
+Shiny does not push invalidations one at a time. They accumulate, and at the next **flush** of the session's event loop, all invalidated reactives are recomputed together, in dependency order. This guarantees that even when several inputs change in the same instant, each downstream node recomputes exactly once, from a consistent set of inputs, and no half-updated intermediate state leaks to the user. It is the same idea as batched re-rendering in modern web frameworks: collect the changes, then settle the whole graph once.
+
+## Two principles for Shiny architecture
+
+Two design rules fall straight out of the graph picture.
+
+**Push computation toward conductors.** If three outputs each need a cleaned version of the data, do not clean it inside all three. Make one `reactive()` that cleans, and have all three outputs depend on it. Otherwise the cleaning runs three times per change, because each output body evaluates independently. Conductors exist to deduplicate shared work, which is the same benefit memoisation gave you in Chapter 3.
+
+**Use endpoints for side effects only.** An `observe()` that does heavy computation stalls the flush cycle for the whole session, because the flush is not done until the observer finishes. If you find an observer doing real work, that work almost always belongs in a `reactive()`, with the observer reduced to consuming the result.
+
+## The relationship to `targets`
+
+A pipeline built with `targets` is, in a real sense, the reactive graph idea applied to long-running computation. Each target is a node. Dependencies are inferred from unevaluated code, exactly the move from Chapter 4. When an upstream input changes, downstream targets are invalidated and recomputed in dependency order. The only real difference is the timescale and where the cache lives. Shiny settles its graph within a session in milliseconds, with the cache in memory. `targets` settles its graph across runs, with the cache on disk, persisting between sessions. Same shape, different clock. We make that explicit in the next chapter.
+
+## What you can now predict
+
+- Why a Shiny output updates without you ever writing the wiring that connects it to its inputs.
+- Why a shared computation should live in one `reactive()` rather than being repeated in several outputs.
+- Why a heavy `observe()` can make an entire app feel frozen.
+- Why `targets` and Shiny feel so similar once you ignore the difference in timescale.
+
+## Exercises
+
+1. Draw the reactive graph for an app with two `numericInput`s, one `reactive()` that adds them, one `renderText` that shows the sum, and one `observeEvent` on a button that snapshots the current sum and prints it. Label every node as source, conductor, or endpoint.
+
+2. In a small app, deliberately introduce the "three consumers, one expensive computation repeated three times" anti-pattern, with `cat()` tracing. Then refactor the computation into a single `reactive()` and confirm from the trace that it now runs once per change instead of three times.
+
+3. Write a tiny reactive system in base R, no Shiny. Provide `make_signal(initial)`, returning something you can get and set, and `watch(signal, callback)`, which runs `callback` whenever the signal is set. Use only closures and environments. You will not reproduce Shiny's flush cycle, but you will reproduce the read-is-subscribing core.
+
+4. Explain, in terms of dependency registration, why wrapping a value in `isolate()` inside a `reactive()` can stop that reactive from updating when you expected it to. Construct a small example where this is a bug and a small example where it is exactly what you want.

@@ -1,0 +1,204 @@
+---
+title: "Metaprogramming: Code as Data"
+---
+
+In Chapter 4 we saw something quietly radical. When you write `filter(df, x > 3)`, R does not run `x > 3` and pass the answer. It hands the function the *unevaluated code* and lets the function decide what to do with it. That was our first glimpse of an idea that runs all the way through R: **code is data**. A piece of R code is an ordinary object that you can store in a variable, take apart, build up piece by piece, and choose to run later, or not at all.
+
+This chapter makes that idea explicit and hands you the small toolkit R provides for working with code as data. We will take it slowly, one tool at a time, because the next chapter uses these tools to do something that sounds impossible and turns out to be short: build a working interpreter for a small language, in R itself.
+
+## Capturing code without running it
+
+The most basic move is to grab a piece of code and hold it, unevaluated. The tool is `quote()`.
+
+```r
+e <- quote(1 + 2)
+e
+#> 1 + 2
+```
+
+Nothing was added. `e` is not `3`. It is the *expression* `1 + 2`, sitting in a variable, waiting. You can ask what kind of object it is, and you can run it later with `eval()`.
+
+```r
+class(e)
+#> [1] "call"
+
+eval(e)
+#> [1] 3
+```
+
+So `quote()` captures, and `eval()` runs. Between those two moments, the code is just an object you can examine and change like any other. That gap, between capturing code and running it, is the entire playground of metaprogramming.
+
+::: {.callout-note}
+## Analogy: a recipe card versus a cooked meal
+`quote(1 + 2)` is a recipe card that reads "add 1 and 2". It is not the meal. You can read the card, copy it, scribble on it, file it away, or hand it to someone else. `eval()` is the act of actually cooking from the card. Most programming hands you meals; metaprogramming lets you handle the cards.
+:::
+
+## Code is a tree
+
+Once you are holding a piece of code, you can look inside it, because an R expression has a simple, regular structure: it is a *tree*. The technical name is an abstract syntax tree, but the idea is plain. Take this expression:
+
+```r
+e <- quote(f(x, y + 1))
+```
+
+A call like this behaves like a list. Its first element is the function being called, and the rest are the arguments.
+
+```r
+e[[1]]            #> f        (the function)
+e[[2]]            #> x        (first argument)
+e[[3]]            #> y + 1    (second argument, itself a smaller call)
+
+as.list(e)
+#> [[1]] f
+#> [[2]] x
+#> [[3]] y + 1
+```
+
+Notice that the second argument, `y + 1`, is itself a call with its own pieces. Expressions nest inside expressions, which is exactly what makes them a tree.
+
+Now the reveal that ties this to the rest of the book. **In R, everything that happens is a function call**, including the things that do not look like function calls. Arithmetic is a function call. So is an `if`, an index with `[`, even a block of code in curly braces. You can write them in their hidden call form:
+
+```r
+`+`(1, 2)              #> 3
+`if`(TRUE, "yes", "no")  #> "yes"
+`[`(c(10, 20, 30), 2)    #> 20
+```
+
+The backticks just let you refer to these operators by their real names, which are ordinary functions. This uniformity is a gift inherited from Lisp: every expression is one of only three things. It is a **constant** (like `1` or `"hello"`), a **name** (like `x`, a reference to a variable), or a **call** (a function applied to some argument expressions). That is the whole grammar. Because the grammar is so small and regular, code is genuinely easy to treat as data, and in the next chapter we will lean on exactly these three cases.
+
+## Walking and rewriting code
+
+Because a call is list-like, you can not only read its parts but change them.
+
+```r
+e <- quote(a + b)
+e[[1]] <- quote(`*`)   # replace the operator
+e
+#> a * b
+```
+
+You can also walk an entire expression tree and compute something about it. Here is a small function that counts how many additions appear anywhere in an expression. It calls itself on each piece, which is safe here because expression trees are shallow (recall from Chapter 5 that bounded-depth recursion is fine in R; it is only deep iteration you must avoid).
+
+```r
+count_adds <- function(expr) {
+  if (is.call(expr)) {
+    here <- if (identical(expr[[1]], quote(`+`))) 1 else 0
+    here + sum(vapply(as.list(expr)[-1], count_adds, numeric(1)))
+  } else {
+    0   # a constant or a name contains no additions
+  }
+}
+
+count_adds(quote((a + b) * (c + d + e)))
+#> [1] 3
+```
+
+Read what just happened: we wrote a program that takes another program as input and answers a question about it. That is metaprogramming in one breath. Tools like linters, code formatters, and coverage trackers are elaborate versions of `count_adds`.
+
+## Building code from scratch
+
+Just as you can take code apart, you can put it together. The base tool is `bquote()`, which quotes an expression but lets you splice values in using `.()`.
+
+```r
+v <- 5
+bquote(x + .(v))
+#> x + 5
+```
+
+The `x` stayed as code, but `.(v)` was replaced by the current value of `v`. You can also assemble a call directly from its parts:
+
+```r
+call("sum", 1, 2, 3)
+#> sum(1, 2, 3)
+```
+
+This matters because it lets a program generate code tailored to its inputs: a function that, given a column name, builds the right summary expression, or a report generator that assembles analysis code from a configuration.
+
+## Running code needs an environment
+
+We met `eval()` above, but there is a second ingredient we glossed over. To *run* a piece of code, you need two things: the code itself, and a place to look up the names in it. That place is an environment, exactly the side-table from Chapter 2.
+
+```r
+e <- quote(x + 1)
+
+eval(e)
+#> Error: object 'x' not found     (no 'x' in scope here)
+
+eval(e, list2env(list(x = 10)))
+#> [1] 11                          (now 'x' is 10, in the environment we gave)
+```
+
+The same expression gives an error or the answer 11, depending only on the environment you evaluate it in. This is the deepest point of the chapter, and it is worth stating plainly.
+
+::: {.callout-important}
+## Key idea: running code is an expression plus an environment
+Code on its own is inert. To run it you must pair it with an environment that gives meaning to its names. Expression plus environment is the irreducible recipe for evaluation. Hold this pair in mind: it is literally the two arguments to `eval()`, and in the next chapter it becomes the two arguments to the evaluator we build ourselves.
+:::
+
+## Quasiquotation: the modern toolkit
+
+The `rlang` package, which powers the tidyverse, wraps these ideas in a tidier interface called **quasiquotation**. You capture code with `expr()` and splice values or other code back in with `!!` (pronounced "bang-bang").
+
+```r
+library(rlang)
+
+v <- 5
+expr(x + !!v)
+#> x + 5
+```
+
+This is the same move as `bquote`'s `.()`, just with friendlier names. And it closes a loop from Chapter 4. When you write a tidyverse helper with `{{ col }}`, you are using a shortcut for "capture the caller's unevaluated expression with `enquo`, then splice it back in with `!!`". Now you can see all the way down: `{{ }}` is metaprogramming with a comfortable handle on it.
+
+## A statistician's daily metaprogramming: formulas
+
+You already use code as data, probably without naming it, every time you fit a model. A formula like `y ~ x + z` is not computed when you write it. It is a captured, unevaluated expression that also remembers the environment it was written in.
+
+```r
+f <- y ~ x + z
+class(f)
+#> [1] "formula"
+
+f[[1]]            #> `~`
+f[[2]]            #> y
+f[[3]]            #> x + z
+```
+
+A formula is a tree, just like the expressions above, with `~` as its operator. This is why `lm(y ~ x, data = d)` can look up `y` and `x` as columns of `d`: the formula handed `lm` the unevaluated code, and `lm` chose where to evaluate it, exactly as `filter` did in Chapter 4. Every modelling function in R is doing metaprogramming on your behalf.
+
+## The boundary is thin: data made of functions
+
+Here is a small demonstration that is worth a few minutes of wonder, because it shows the code-and-data duality from the other side. We have seen that code can be treated as data. It is also true that data can be built out of nothing but functions. Suppose R had no way to pair two values together. We could *invent* the pair using only closures from Chapter 3.
+
+```r
+cons <- function(a, b) function(selector) selector(a, b)
+car  <- function(pair) pair(function(a, b) a)
+cdr  <- function(pair) pair(function(a, b) b)
+
+p <- cons(1, 2)
+car(p)   #> 1
+cdr(p)   #> 2
+```
+
+There is no list and no vector here. A "pair" is a closure that has captured two values and waits to be told which one to hand back. `car` and `cdr` ask for the first or the second. You would never build pairs this way in real R, but the exercise reveals something deep: the line between a piece of data and a piece of code is much thinner than it looks. The next chapter walks straight across that line.
+
+::: {.callout-tip}
+## Why this matters for your work
+Once you can see metaprogramming, the tidyverse stops being a collection of special cases. `dplyr` verbs, `ggplot2`'s `aes()`, `data.table`'s `j` argument, model formulas, and the way `targets` reads your pipeline (Chapter 4) are all the same move: capture code, inspect or transform it, and evaluate it in a chosen environment. Understanding the move lets you read these libraries' source with comprehension, debug their surprising error messages, and write your own small tools that take code as input.
+:::
+
+## What you can now predict
+
+- Why the same expression can error in one place and succeed in another, with nothing changed but the environment.
+- Why `lm(y ~ x, data = d)` can find `y` and `x` in a data frame even though they are not variables in your console.
+- Why the tidyverse can let you name columns without quotes, and what `{{ }}` is shorthand for.
+- How a tool could read your code and answer questions about it without running it.
+
+## Exercises
+
+1. Use `quote()` to capture `mean(x) + sd(y)`. Without running it, extract just the two function names being called. Then evaluate the whole expression in an environment where `x` and `y` are vectors you supply.
+
+2. Extend `count_adds` into `count_calls(expr, fname)` that counts how many times any given function is called inside an expression. Test it by counting the `*` operations in `quote(a * b + c * d * e)`.
+
+3. Write a function `make_power(n)` that *builds and returns the code* for raising its argument to the power `n`, using `bquote`. For example `make_power(3)` should return the expression `x ^ 3`. Then evaluate it for a specific `x`.
+
+4. Confirm that a formula carries its environment. Create `y ~ x` inside a function where a local variable `secret` exists, return the formula, and from outside the function recover `secret` through the formula's environment. Explain the result using Chapter 2.

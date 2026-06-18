@@ -1,0 +1,68 @@
+---
+title: "Capstone: One System, Every Idea"
+---
+
+Every idea in this book exists, in some form, inside any non-trivial R system. To show that they are not ten separate topics but one connected way of thinking, this final chapter walks through a single realistic system and points to where each idea lives. We will not build the whole thing line by line; we will trace the machinery.
+
+## The scenario
+
+Picture a small application built for an agricultural statistics office. It reads administrative data on holdings and yields, fits a small-area estimate of mean output for each region, caches the fits, and serves the results through a Shiny dashboard that lets a user filter regions, drill into individual estimates, and download the underlying data. It is the kind of system a working statistician actually ships, and it touches every chapter.
+
+## Where each idea lives
+
+### Foundations (Chapter 1)
+
+The data is large, so memory layout is not an afterthought. The yield series are held as plain numeric vectors, contiguous in memory, so that the per-region summaries run as vectorised operations that the cache cooperates with rather than as pointer-chasing loops. The decision to keep the heavy reference tables in one shared structure, loaded once, rather than rebuilt per request, is a direct application of "moving data is the expensive part".
+
+### Environments (Chapter 2)
+
+Helper functions live in an `R/` directory and are sourced into a clean environment by `_targets.R`. The pipeline's definition environment therefore contains only those helpers, with no scratch objects and no test data, so nothing irrelevant is dragged into a target's dependency footprint. Scope discipline here is a performance and correctness decision, not a stylistic one.
+
+### Closures (Chapter 3)
+
+The fitting routine is a function factory. `make_estimator(prior, model_spec)` returns a function whose only argument is the data, with the prior and the specification captured in its environment. Swapping priors or specifications is then a one-line change, and the data-flow code never has to mention configuration at all.
+
+### Lazy evaluation (Chapter 4)
+
+The pipeline is declared, not run. `tar_target(estimate, fit_per_region(clean, model_spec))` captures an unevaluated expression. `targets` reads that expression, discovers that `estimate` depends on `clean` and `model_spec`, and adds the edges to its graph, all before any fitting happens. The plan exists because the code could be inspected as data.
+
+### The call stack and conditions (Chapter 5)
+
+Each per-region fit is wrapped in `withCallingHandlers()`. A region that fails to converge is logged with its diagnostic and replaced by a sentinel value, while the remaining regions continue. The pipeline finishes successfully and carries a record of which regions failed and why. A single bad region is a local event, not a fatal one, because we chose a calling handler over an unwinding one.
+
+### Object systems (Chapter 6)
+
+Each estimate is an S3 object: a list with class `nuts_estimate`, holding the posterior summary, the relevant data subset, and metadata. `print` gives a one-line view, `summary` the full posterior table, `plot` a forest plot of regional estimates with intervals. R6 is reserved for the one component that manages a resource over time: the connector that authenticates once against the source database and is reused across the run.
+
+### Reactivity (Chapter 7)
+
+The dashboard loads the pipeline's output once when a session starts. A single `reactive()` filters the estimates to the regions the user has selected. Three downstream outputs, a table, a map, and a forest plot, all depend on that one conductor, so the filter runs once per change rather than three times. The graph deduplicates the shared work automatically.
+
+### Performance (Chapter 8)
+
+The pipeline is memoised on disk by `targets`: only regions whose underlying data changed are refitted when the pipeline is rerun. Inside the dashboard, the map render is slow because it depends on a large shapefile, so it runs inside a `future` and the session stays responsive while it draws. The shapefile is loaded once at startup, not per session, the same "load shared data once" decision as in the foundations.
+
+### Metaprogramming (Chapter 9)
+
+Code-as-data is not only inside `targets`; it surfaces in the analysis itself. The models are specified with formulas, `output ~ region + year`, which are captured, unevaluated expressions that the fitting code evaluates against each region's data. A small internal helper builds those formulas programmatically from a configuration file, so that adding a covariate is a change to data, not to code. When the dashboard lets an analyst type a custom filter, that text is parsed into an expression, checked by walking its tree to forbid anything dangerous, and only then evaluated in a controlled environment. Every one of these is the capture-inspect-evaluate move from Chapter 9.
+
+### Building a runtime (Chapter 10)
+
+The evaluator chapter does not ship inside this system, and it is not meant to. Its role is what it leaves behind in the person who built it. The engineer who has written `lang_eval` reads the `targets` source and recognises the dependency walk as an expression traversal. They read a confusing tidyverse error and locate it as a failure in the capture-and-evaluate step. They reason about a Shiny reactive's scope without hesitation, because they have parented an environment at a definition environment with their own hands. The interpreter is the rung at the top of the ladder: having built one, the reader sees every other piece of machinery in this system as a variation on something they understand from the inside.
+
+## What you have learned
+
+Read that list again and notice that the ideas are not really separable. The factory in Chapter 3 only works because of the lexical scoping in Chapter 2, which only makes sense given the heap in Chapter 1. The pipeline graph in Chapter 4 is invalidated by the same kind of machinery as the reactive graph in Chapter 7. The on-disk cache in Chapter 8 is the in-closure cache from Chapter 3, grown up and moved to disk. The reference semantics that make R6 useful in Chapter 6 are the same reference semantics that make environments the one exception to copy-on-modify in Chapter 2. The metaprogramming of Chapter 9 is the lazy evaluation of Chapter 4 made deliberate, and the evaluator of Chapter 10 is all of it at once, assembled into a small machine that you built. It is one fabric.
+
+The argument that opened this book, borrowed from the course that inspired it, was that you cannot reason about a language by memorising rules: you have to be able to predict what the runtime will do. Everything here has been in service of that, for R. You now have a working model that runs from electrical switches up to the reactive graph, and a habit to go with it.
+
+::: {.callout-tip}
+## The habit
+When R surprises you, do not look up the rule. Predict, from the model, what should happen, then run a tiny experiment to check. When the prediction and the experiment disagree, you have found a gap in the model, and closing it is how the model gets sharper. Read the source of a function you have always taken for granted. Print an object you have always just used. Ask why, and answer with mechanism. That habit, more than any single fact in this book, is what makes the difference.
+:::
+
+## Where to go next
+
+Three books go deeper than this course, and you are now ready for them. Hadley Wickham's *Advanced R* covers environments, functional programming, and metaprogramming in full depth, and is the natural next step. Norman Matloff's *The Art of R Programming* is excellent on performance and debugging from a systems perspective. For Shiny in production, *Engineering Production-Grade Shiny Apps* by Colin Fay and colleagues builds on the reactive model from Chapter 7. For pipelines, the `targets` manual by Will Landau is thorough and free online.
+
+Beyond reading, the best next step is to take a piece of R you rely on, a package you use, a Shiny app you maintain, a pipeline you run, and explain it to yourself using the model in this book. Find the environments. Find the closures. Find the graph. Find the cache. When you can do that for code you did not write, the model is yours.

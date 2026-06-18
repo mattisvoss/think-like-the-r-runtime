@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use or teach from this book, please cite it as below."
+title: "Think Like the R Runtime"
+abstract: >-
+  A first-principles course in how R actually works, from memory addresses and
+  pointers up through environments, closures, lazy evaluation, the call stack,
+  object systems, reactivity, and performance, culminating in metaprogramming
+  and building a small interpreter for R in R. Written for the statistical and
+  machine learning community.
+type: book
+authors:
+  - family-names: "Voss"
+    given-names: "Mattis"
+year: 2026
+url: "https://github.com/mattisvoss/think-like-the-r-runtime"
+repository-code: "https://github.com/mattisvoss/think-like-the-r-runtime"
+license: CC-BY-4.0
+keywords:
+  - R
+  - statistical computing
+  - data science
+  - machine learning
+  - environments
+  - closures
+  - lazy evaluation
+  - reactivity
+  - Shiny
+  - targets
+  - metaprogramming
+  - interpreters
+  - programming language internals

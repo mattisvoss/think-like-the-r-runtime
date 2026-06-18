@@ -1,0 +1,16 @@
+% Preamble for the PDF build of "Think Like the R Runtime".
+% Kept deliberately small so the build is robust across TeX installations.
+
+% Slightly more generous line spacing for readability.
+\usepackage{setspace}
+\setstretch{1.08}
+
+% Nicer spacing around code blocks.
+\usepackage{etoolbox}
+
+% Avoid overfull lines from long inline code by allowing breaks.
+\usepackage{microtype}
+
+% Discourage orphan and widow lines.
+\widowpenalty=10000
+\clubpenalty=10000

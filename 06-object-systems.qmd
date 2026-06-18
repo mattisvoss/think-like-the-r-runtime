@@ -1,0 +1,128 @@
+---
+title: "Object Systems: S3, S4, R6"
+---
+
+R has not one object-oriented system but four. Two of them are functional, dispatching on the class of an argument. One is fully encapsulated and, as you will see, is built directly out of the environments from Chapter 2. This chapter explains each, shows how dispatch actually works as a mechanical lookup, and gives you a rule for choosing.
+
+## S3: the simplest possible object system
+
+An S3 object is any R value with a `class` attribute. There are no class declarations, no inheritance contracts, no validation built in. The whole system is a convention enforced by one primitive, `UseMethod()`, which performs the dispatch.
+
+```r
+# Constructors: just lists carrying a class attribute.
+new_circle <- function(radius) {
+  structure(list(radius = radius), class = "circle")
+}
+
+new_rectangle <- function(width, height) {
+  structure(list(width = width, height = height), class = "rectangle")
+}
+
+# A generic function: it promises to dispatch on the class of its argument.
+area <- function(shape) UseMethod("area")
+
+# Methods, named generic.class.
+area.circle    <- function(shape) pi * shape$radius^2
+area.rectangle <- function(shape) shape$width * shape$height
+area.default   <- function(shape) stop("No area method for class ", class(shape))
+
+area(new_circle(5))           # 78.54
+area(new_rectangle(3, 4))     # 12
+```
+
+The dispatch is entirely mechanical, and worth spelling out because it demystifies a great deal of base R. When you call `area(x)`, R enters the body of `area`, sees `UseMethod("area")`, reads the `class` attribute of `x`, builds the candidate method name `area.circle`, and looks that name up using the ordinary scoping rules from Chapter 2. If the class attribute lists several classes, R tries them in order. If none match, it falls back to `area.default`. There is no registry and no magic; method dispatch is just name construction followed by a normal variable lookup.
+
+Most of base R works this way. `print`, `summary`, `plot`, `predict`, `coef`, and `residuals` are all S3 generics. When you fit a linear model with `lm()`, the result is a list with class `"lm"`, and calling `summary(fit)` dispatches to `summary.lm()`. You can write your own `summary.my_class()` for your own objects and it will be found automatically, because dispatch is just a lookup and your method is just a name in scope.
+
+::: {.callout-note}
+## Analogy: surnames and a phone book
+A generic is like calling out a first name, "area!", in a crowded room. `UseMethod` looks at the object's class to get a surname, "circle", and pages the specific person "area.circle" out of the phone book (the scope chain). If nobody by that surname answers, it pages the family default.
+:::
+
+## S4: classes that take themselves seriously
+
+S4 is what S3 would look like if the designers had given it formal structure. Classes have named, typed slots. Generics are declared explicitly. Methods are registered with full type signatures, and dispatch can consider more than one argument. The price is verbosity.
+
+```r
+setClass("Circle",    representation(radius = "numeric"))
+setClass("Rectangle", representation(width = "numeric", height = "numeric"))
+
+setGeneric("area", function(shape) standardGeneric("area"))
+
+setMethod("area", "Circle",    function(shape) pi * shape@radius^2)
+setMethod("area", "Rectangle", function(shape) shape@width * shape@height)
+
+area(new("Circle", radius = 5))
+```
+
+Reach for S4 when you are writing a Bioconductor package, where the entire ecosystem is S4 and conforming is the path of least resistance; when you genuinely need **multiple dispatch**, a method whose behaviour depends on the classes of two or more arguments at once; or when you want slot-level type checking enforced for you. For most everyday work, S3 is enough.
+
+## R6: encapsulated, mutable, and built from environments
+
+R6 is fundamentally different from S3 and S4, and it is where the whole book pays off, because an R6 object *is* an environment. Its methods are functions stored inside that environment, conventionally reached through `self$` and `private$`. And because environments are passed by reference (Chapter 2), R6 objects do not copy when passed to functions. They behave like objects in Python or Java: hand the same object to two functions and both see each other's changes.
+
+```r
+library(R6)
+
+Counter <- R6Class("Counter",
+  private = list(
+    count = 0
+  ),
+  public = list(
+    initialize = function(start = 0) {
+      private$count <- start
+    },
+    increment = function(by = 1) {
+      private$count <- private$count + by
+      invisible(self)              # returning self enables chaining
+    },
+    value = function() {
+      private$count
+    }
+  )
+)
+
+c <- Counter$new(10)
+c$increment()$increment(by = 5)
+c$value()    # 16
+```
+
+Now compare this to `make_counter` from Chapter 3. The two have the same external behaviour: a counter with private, persistent state and methods to change and read it. Under R6, the count lives in the object's private environment. Under the factory pattern, the count lived in the captured environment of the closures. *Both are environments.* The difference is purely the layer of convention R6 adds: explicit `public` and `private` sections, an automatic `self`, an inheritance system, and a constructor. R6 is closures wearing a uniform.
+
+::: {.callout-important}
+## Key idea: encapsulated objects are environments
+S3 and S4 attach behaviour to data through external generics; the data itself is inert. R6 puts the behaviour and the mutable state together inside one environment, and gets reference semantics for free because that is how environments already work. If you understood Chapters 2 and 3, you already understand R6; the rest is naming.
+:::
+
+## How to choose
+
+The decision is structural, not a matter of taste. Ask one question: **do I need mutable state shared across method calls?**
+
+If your object is essentially data, a fitted model, a configured plot, a tidy result, use **S3**. Wrap a list in a class, write methods for the generics that matter (`print`, `summary`, `predict`), and stop. This is the right answer the large majority of the time in statistical work.
+
+If you need formal typed slots or multiple dispatch, or you are in the Bioconductor world, use **S4**.
+
+If you need an object that remembers things between calls and is naturally about *managing something over time*, a database connection, a streaming file reader, a stateful API client, a cache with explicit invalidation, use **R6**. The encapsulation that S3 lacks is exactly what you want when an object's job is to own the lifecycle of an external resource.
+
+## Why this matters for statistical package design
+
+For a typical statistical or official-statistics package, estimating small-area means, producing indicators, running scenarios, S3 is almost always right. Your objects are estimated quantities: they hold numbers and metadata, not behaviour. Write a constructor that validates its inputs, a compact set of S3 methods so your objects print and summarise and plot sensibly, and resist the urge to reach for a heavier system. This echoes the advice in Hadley Wickham's *Advanced R*: prefer functional design when the domain is mathematical, and the domain of statistics is mathematical.
+
+R6 earns its place when you are managing a *resource* rather than representing a quantity: a session against a statistical office's API that authenticates once and is reused, a reader that must remember its position in a large fixed-width file, a connection pool. There the reference semantics and explicit lifecycle are a feature, not overhead.
+
+## What you can now predict
+
+- Why writing `summary.myclass` is all it takes to make `summary()` work on your objects.
+- Why an R6 object handed to two functions lets each see the other's changes, while an S3 list would not.
+- Why R6 and the closure-based counter are, underneath, the same mechanism.
+- Which object system a new piece of code should use, from a single question about state.
+
+## Exercises
+
+1. Build an S3 class `nuts_estimate` wrapping a regional estimate: a mean, a standard error, a sample size, and a region code. Implement `print`, `summary`, and a `plot` method that draws a horizontal bar with the confidence interval.
+
+2. Convert the `make_counter()` factory from Chapter 3 into an R6 class. Note exactly where you used `<<-` in the closure version and what replaces it in R6, and explain why the replacement works.
+
+3. Read the source of `shiny::reactiveValues`. Identify which object system it uses and explain, in two sentences and with reference to Chapter 2, why that choice is the right one.
+
+4. Take an S3 object you have created and pass it to a function that modifies one of its elements. Confirm the original is unchanged. Now do the same with an R6 object and confirm the original *is* changed. Explain both results using copy-on-modify versus reference semantics.

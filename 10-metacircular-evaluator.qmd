@@ -1,0 +1,250 @@
+---
+title: "The Metacircular Evaluator"
+---
+
+This is the chapter the whole book has been walking toward. Its title sounds forbidding, so let us defuse it immediately. A **metacircular evaluator** is a program that runs a language, written *in that same language*. We are going to write a small interpreter for a useful slice of R, in R. When it works, you will have built, with your own hands, a tiny version of the very thing that has been running your code all along.
+
+The reason this is the climax of a book called *Think Like the R Runtime* is simple. There is no surer way to understand a runtime than to build one. Every idea from the earlier chapters will reappear here, not as a topic but as a line of code we cannot do without: environments become the place we look up names, closures become the way our functions remember where they were born, and the expression-plus-environment recipe from Chapter 9 becomes the signature of our main function.
+
+We will build it in small, safe steps, testing after each one. Do not skim. Type each piece into an R session and watch it work, because the understanding is in the watching.
+
+## The plan: eval and apply
+
+Running code turns out to be a conversation between two functions that call each other.
+
+To **evaluate** an expression, you look at what kind of expression it is. If it is a number, it is its own value. If it is a name, you look it up. If it is a call, you evaluate the function and each of its arguments, and then you **apply** the function to those argument values.
+
+To **apply** a function to some arguments, you create a fresh environment, bind the arguments to the function's parameter names in it, and then **evaluate** the function's body in that new environment.
+
+Read those two paragraphs again and notice that each mentions the other. Evaluate calls apply; apply calls evaluate. This mutual recursion is the engine of every interpreter ever written. Everything else is detail.
+
+We need just two helpers first, for our environments. We will not reinvent them: we will use R's own environments from Chapter 2, which already do everything we need, including the parent chain.
+
+```r
+env_new <- function(parent) new.env(parent = parent)
+env_get <- function(env, name) get(name, envir = env, inherits = TRUE)
+env_set <- function(env, name, value) assign(name, value, envir = env)
+```
+
+`env_get` uses `inherits = TRUE`, which means: if the name is not in this environment, walk the parent chain and keep looking. That one flag is lexical scoping, handed to us for free.
+
+## Step 1: the simplest expressions
+
+We begin `lang_eval`, our evaluator. Its two arguments are an expression and an environment, exactly the pair Chapter 9 told us we would need. The two easiest cases are constants and names.
+
+```r
+lang_eval <- function(expr, env) {
+  # A constant evaluates to itself.
+  if (is.numeric(expr) || is.character(expr) || is.logical(expr)) {
+    return(expr)
+  }
+  # A name is a variable: look it up in the environment.
+  if (is.symbol(expr)) {
+    return(env_get(env, as.character(expr)))
+  }
+  stop("lang_eval: I do not yet understand: ", deparse(expr))
+}
+```
+
+We can already evaluate the two simplest kinds of code. Note that we use `quote()` from Chapter 9 to hand our evaluator a piece of unevaluated code.
+
+```r
+e <- env_new(emptyenv())
+env_set(e, "x", 10)
+
+lang_eval(quote(42), e)    #> 42      a constant is itself
+lang_eval(quote(x), e)     #> 10      a name is looked up
+lang_eval(quote(y), e)     #> Error: object 'y' not found
+```
+
+The constant returns itself. The name `x` is found in the environment. The name `y` is not, and the error comes from `env_get` walking the (empty) parent chain and finding nothing, precisely the lookup mechanism of Chapter 2.
+
+## Step 2: function calls
+
+Now the interesting case: a call, such as `1 + 2`. Recall from Chapter 9 that a call is a tree whose first element is the function and whose remaining elements are the argument expressions. To evaluate a call, we evaluate the function, evaluate each argument, and apply one to the others. For now our "functions" will be ordinary R primitives like `+`, which we can apply with `do.call`.
+
+```r
+lang_eval <- function(expr, env) {
+  if (is.numeric(expr) || is.character(expr) || is.logical(expr)) {
+    return(expr)
+  }
+  if (is.symbol(expr)) {
+    return(env_get(env, as.character(expr)))
+  }
+  if (is.call(expr)) {
+    fn   <- lang_eval(expr[[1]], env)              # evaluate the function
+    args <- lapply(as.list(expr)[-1], lang_eval, env = env)  # evaluate args
+    return(do.call(fn, args))                      # apply
+  }
+  stop("lang_eval: I do not understand: ", deparse(expr))
+}
+```
+
+To make this run we need an environment in which the names `+`, `*`, and so on refer to the real arithmetic functions. This is our language's global environment.
+
+```r
+global_env <- env_new(emptyenv())
+env_set(global_env, "+", `+`)
+env_set(global_env, "*", `*`)
+env_set(global_env, "-", `-`)
+env_set(global_env, "<", `<`)
+
+lang_eval(quote(1 + 2), global_env)          #> 3
+lang_eval(quote(2 * (3 + 4)), global_env)    #> 14
+```
+
+Trace the second one. The outer call is `*`. We evaluate its function: the name `*` is looked up in `global_env` and returns R's multiplication function. We evaluate its two arguments: `2` is a constant, and `3 + 4` is itself a call, so `lang_eval` recurses, evaluates `+`, `3`, and `4`, and applies, giving `7`. Then we apply `*` to `2` and `7`, giving `14`. Our evaluator is walking the tree exactly as Chapter 9 described, and the mutual recursion between evaluating and applying is already visible: a call's arguments are evaluated by the very same function.
+
+## Step 3: a special form, `if`
+
+Not everything can be handled by "evaluate all the arguments, then apply". Consider `if`. If we evaluated both branches before choosing, an `if` guarding against an error would run the error anyway. So `if` must be handled specially: evaluate the condition, then evaluate only the chosen branch. Constructs that bend the normal evaluate-everything rule are called **special forms**, and every language has a handful.
+
+We add a check for `if` before the general call case.
+
+```r
+lang_eval <- function(expr, env) {
+  if (is.numeric(expr) || is.character(expr) || is.logical(expr)) {
+    return(expr)
+  }
+  if (is.symbol(expr)) {
+    return(env_get(env, as.character(expr)))
+  }
+  if (is.call(expr)) {
+    op <- expr[[1]]
+
+    # Special form: if
+    if (identical(op, quote(`if`))) {
+      if (isTRUE(lang_eval(expr[[2]], env))) {
+        return(lang_eval(expr[[3]], env))   # the "then" branch
+      } else {
+        return(lang_eval(expr[[4]], env))   # the "else" branch
+      }
+    }
+
+    # General case: ordinary function application
+    fn   <- lang_eval(op, env)
+    args <- lapply(as.list(expr)[-1], lang_eval, env = env)
+    return(do.call(fn, args))
+  }
+  stop("lang_eval: I do not understand: ", deparse(expr))
+}
+```
+
+```r
+lang_eval(quote(if (1 < 2) 10 else 20), global_env)   #> 10
+lang_eval(quote(if (5 < 2) 10 else 20), global_env)   #> 20
+```
+
+## Step 4: functions of our own, with closures
+
+So far our language can only use functions that already exist. The final step, and the one that makes this a real language, is letting our language *define* its own functions. This is where every idea from Part II comes together at once.
+
+When our evaluator meets a `function` expression, it must build a closure. From Chapter 3 we know exactly what a closure is: the parameters, the body, and a pointer to the environment in which it was defined. We capture all three.
+
+When our evaluator later *applies* one of these closures, it must, from Chapters 2 and 3: create a new environment whose parent is the closure's definition environment (this is what makes scoping lexical), bind the arguments to the parameter names in that new environment, and evaluate the body there.
+
+Here is the finished evaluator, with the `function` special form and a proper `lang_apply` that handles both R primitives and our own closures.
+
+```r
+lang_eval <- function(expr, env) {
+  if (is.numeric(expr) || is.character(expr) || is.logical(expr)) {
+    return(expr)
+  }
+  if (is.symbol(expr)) {
+    return(env_get(env, as.character(expr)))
+  }
+  if (is.call(expr)) {
+    op <- expr[[1]]
+
+    if (identical(op, quote(`if`))) {
+      if (isTRUE(lang_eval(expr[[2]], env))) {
+        return(lang_eval(expr[[3]], env))
+      } else {
+        return(lang_eval(expr[[4]], env))
+      }
+    }
+
+    # Special form: function -> build a closure that remembers its birthplace
+    if (identical(op, quote(`function`))) {
+      return(list(
+        kind   = "closure",
+        params = names(expr[[2]]),   # the parameter names
+        body   = expr[[3]],          # the unevaluated body
+        env    = env                 # the definition environment
+      ))
+    }
+
+    # General case: evaluate the function and the arguments, then apply
+    fn   <- lang_eval(op, env)
+    args <- lapply(as.list(expr)[-1], lang_eval, env = env)
+    return(lang_apply(fn, args))
+  }
+  stop("lang_eval: I do not understand: ", deparse(expr))
+}
+
+lang_apply <- function(fn, args) {
+  # A built-in R function (like + or *).
+  if (is.function(fn)) {
+    return(do.call(fn, args))
+  }
+  # One of our own closures.
+  if (is.list(fn) && identical(fn$kind, "closure")) {
+    call_env <- env_new(parent = fn$env)            # new frame, parented at birthplace
+    for (i in seq_along(fn$params)) {
+      env_set(call_env, fn$params[[i]], args[[i]])  # bind arguments
+    }
+    return(lang_eval(fn$body, call_env))            # run the body there
+  }
+  stop("lang_apply: not something I can call")
+}
+```
+
+Now the moment of truth. We will build, in our own language, the `make_adder` factory from Chapter 3, and check that it gets closures right.
+
+```r
+add_maker <- lang_eval(quote(function(n) function(x) x + n), global_env)
+
+add5 <- lang_apply(add_maker, list(5))
+add9 <- lang_apply(add_maker, list(9))
+
+lang_apply(add5, list(10))   #> 15
+lang_apply(add9, list(10))   #> 19
+```
+
+Stop and savour this. Our hand-written evaluator just produced two functions that share a body and behave differently, because each remembers a different `n`. We did not build special machinery for that. It fell out of one line in `lang_apply`, the line that parents the new environment at `fn$env`. Lexical scoping and closures are not features we added; they are consequences of where we pointed a parent pointer, exactly as the book has claimed since Chapter 2.
+
+::: {.callout-important}
+## Key idea: the runtime is not magic, because you just built one
+Every behaviour we have described across nine chapters, name lookup walking a parent chain, closures remembering their birthplace, the evaluate-then-apply rhythm of running a call, is now sitting in front of you as a few dozen lines of ordinary R. The interpreter that runs your real R code is vastly larger and faster, but it is the same shape. You are no longer guessing what the runtime does. You have written its essence.
+:::
+
+## Why it is called metacircular
+
+Our evaluator is written in R, and it evaluates R. The language doing the interpreting and the language being interpreted are the same. That circularity is the point of the name, and it is also a genuine intellectual loophole worth being honest about: we did not have to explain how `+` adds, or how `do.call` calls, because we borrowed those directly from the R underneath us. A metacircular evaluator explains a language *in terms of itself*, which is illuminating about structure (how scoping, closures, and special forms fit together) while quietly leaning on the host language for the very bottom. To explain that bottom you would descend to Chapter 1: the C code, the registers, the memory. The two ends of this book meet here.
+
+## The real thing
+
+You have been using a more powerful version of `lang_eval` and `lang_apply` all along. R exposes them directly. `eval()` is the real evaluator, and `quote()` (Chapter 9) is how you hand it code, and an environment is where it runs.
+
+```r
+eval(quote(2 * (3 + 4)))   #> 14
+```
+
+When you call `eval`, R does, in fast and battle-tested C, what our `lang_eval` did in R: it dispatches on the kind of expression, looks names up by walking environments, treats `if` and `function` and a few others as special forms, and applies functions by making a new evaluation environment parented at each function's definition environment. You now know what is inside that call, because you wrote a small one yourself.
+
+## What you can now predict
+
+- Why interpreting a language is a conversation between an "evaluate" step and an "apply" step.
+- Why some constructs (`if`, `function`, and in R `quote` itself) cannot be ordinary functions and must be special forms.
+- Why closures and lexical scoping require nothing more than parenting a call's environment at the function's definition environment.
+- What R's own `eval` is doing, in outline, every time it runs a line of your code.
+
+## Exercises
+
+1. Add multiplication-free subtraction's friend: extend `global_env` with a new primitive, for example `%%` for remainder, and confirm your evaluator can use it with no change to `lang_eval`. Why did no change to the evaluator's code turn out to be necessary?
+
+2. Add a `let` special form so that `let(x, 5, x + x)` evaluates the third argument in a new environment where `x` is bound to `5`. Where in `lang_eval` does it belong, and why must it be a special form rather than an ordinary function?
+
+3. Our evaluator is eager: it evaluates every argument before applying. Make one argument lazy. Change `lang_apply` so that instead of receiving evaluated arguments it receives the unevaluated argument expressions plus the calling environment, and evaluates each only when first needed. You will have reinvented the promise from Chapter 4.
+
+4. Add an error if a closure is called with the wrong number of arguments. Then explain, in terms of `lang_apply`, why R's own "unused argument" and "missing argument" errors exist and where in an interpreter they must be detected.

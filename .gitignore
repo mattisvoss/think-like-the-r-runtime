@@ -1,0 +1,24 @@
+# Quarto build output and cache
+/_book/
+/.quarto/
+/site_libs/
+
+# Rendered files that should not be committed (the Action builds these)
+*.pdf
+!docs/**/*.pdf
+
+# LaTeX intermediates
+*.aux
+*.log
+*.toc
+*.out
+*.synctex.gz
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+*~
+.Rproj.user
+.Rhistory
+.RData
+.Rapp.history

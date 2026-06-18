@@ -1,0 +1,166 @@
+---
+title: "Closures"
+---
+
+Every function in R is a closure. Most R programmers do not know this, and the ones who do are usually the ones writing the libraries everyone else depends on. This chapter explains what that sentence means, why it follows directly from the previous two chapters, and how it quietly powers function factories, the cache in `memoise`, R6 objects, and Shiny reactives.
+
+## The three parts of a function
+
+We can now state precisely what an R function is. A function is exactly three things: its **arguments** (the names between the parentheses), its **body** (the expression to evaluate), and its **definition environment** (the environment in which it was created, introduced in the previous chapter). R lets you pull out all three.
+
+```r
+f <- function(x, y = 2) x + y
+
+formals(f)         # the arguments: x, and y with default 2
+body(f)            # the body: x + y
+environment(f)     # the definition environment
+```
+
+When you call `f(3)`, four things happen, and they are exactly the heap-and-stack mechanics from Chapter 1. R creates a new environment whose parent is `environment(f)`. It binds `x = 3` and `y = 2` into that environment. It evaluates the body there. Then it returns the result and discards the environment, *unless something else still points to it*. That italicised clause is the whole definition of a closure.
+
+::: {.callout-important}
+## Key idea: a closure is a function plus a captured environment
+A closure is a function together with a reference to its definition environment that survives the call which created it. Because every R function carries a pointer to its definition environment, every R function is technically a closure. The idea only becomes interesting when that captured environment holds state the function can read or change.
+:::
+
+## The factory pattern
+
+The clearest demonstration of closures is a function that returns a function.
+
+```r
+make_adder <- function(n) {
+  function(x) x + n
+}
+
+add3 <- make_adder(3)
+add5 <- make_adder(5)
+
+add3(10)    # 13
+add5(10)    # 15
+
+environment(add3)$n    # 3
+environment(add5)$n    # 5
+```
+
+Trace it through the Chapter 1 picture. We called `make_adder` twice. Each call created a fresh environment on the heap containing a binding for `n`. Each call returned an inner function whose definition environment is that fresh environment. The two returned functions therefore have identical arguments (`x`) and identical bodies (`x + n`), yet they behave differently, because they carry different definition environments. The last two lines prove it by reaching directly into each closure's captured environment and reading the `n` it kept.
+
+This pattern is everywhere in the R ecosystem once you start looking. The `scales` package gives you `label_dollar(prefix = "$")`, which returns a formatting function. The `purrr` package gives you `partial(f, x = 1)`, which returns a function with one argument pinned. Many statistical constructions are naturally families of functions: a smoothing routine that returns a fitted function, a likelihood builder that returns a function of the parameters. Whenever the right design is "a configurable family of functions", the closure-based factory is usually the cleanest way to express it.
+
+::: {.callout-note}
+## Analogy: a cookie cutter with a setting
+`make_adder` is a cookie cutter with a dial. You set the dial to 3, stamp out a function, and that function "remembers" the 3 forever because the setting was baked into its own private environment at the moment of stamping. Set the dial to 5 and stamp again, and you get a different function with a different memory. The cutter (the factory) and the cookies (the returned closures) are different things.
+:::
+
+## Hidden state and the superassignment arrow
+
+Closures give R something that looks like private, mutable state. The mechanism is the **superassignment** operator, written `<<-`. The ordinary arrow `<-` creates or updates a binding in the *current* environment. The double arrow walks *up* the parent chain looking for an existing binding of that name, and modifies the first one it finds.
+
+```r
+make_counter <- function(start = 0) {
+  count <- start
+  list(
+    increment = function() {
+      count <<- count + 1     # modify count in the parent environment
+      invisible(count)
+    },
+    reset = function() {
+      count <<- start
+      invisible(count)
+    },
+    value = function() count
+  )
+}
+
+c1 <- make_counter()
+c1$increment(); c1$increment(); c1$increment()
+c1$value()       # 3
+
+c2 <- make_counter(100)
+c2$value()       # 100, completely independent of c1
+```
+
+Each call to `make_counter()` creates a fresh environment containing `count`. The three inner functions all close over *that same* environment, so they share one counter. From outside, `c1` and `c2` look like little objects with methods, and they keep separate state, but there is no class system here at all, only environments and functions. This is sometimes called **functional object-oriented programming**, and it is the conceptual seed from which R6 grows later in the book.
+
+Notice that this only works because of the reference behaviour of environments from the previous chapter. The three inner functions are not each given a private copy of `count`. They share one environment by pointer, so when `increment` changes it, `value` sees the change.
+
+## The classic trap: closures in a loop
+
+The single most common closure bug in R involves capturing a loop variable. The example is small, but the same shape appears in larger Shiny apps and package code, so it is worth burning into memory.
+
+```r
+fs <- list()
+for (i in 1:3) {
+  fs[[i]] <- function() i
+}
+
+fs[[1]]()    # 3, not 1
+fs[[2]]()    # 3, not 2
+fs[[3]]()    # 3
+```
+
+Why does every stored function return 3? Because all three inner functions close over the *same* environment, the one the `for` loop ran in. There is only one `i` in that environment. By the time you call the stored functions, the loop has finished and that single `i` holds its final value, 3. The closures faithfully look up `i` and report what they find. Nothing is broken; the functions are doing exactly what lexical scoping says they must.
+
+The fix is to give each function its own environment with its own `i`. The standard way is to use a function that creates a fresh call environment per iteration.
+
+```r
+fs <- lapply(1:3, function(i) {
+  function() i
+})
+
+fs[[1]]()    # 1
+fs[[2]]()    # 2
+fs[[3]]()    # 3
+```
+
+Now each iteration is a separate call to the function passed to `lapply`, and each call makes its own environment with its own `i`. The functions returned from those calls close over different environments and report different values. This is also exactly why `purrr::map` is immune to the bug: it uses the same per-element call mechanism.
+
+## Memoise, in eight lines
+
+To make all of this concrete, here is the entire idea of `memoise::memoise()`, built from scratch using only a closure and an environment.
+
+```r
+memoise <- function(f) {
+  cache <- new.env(parent = emptyenv())
+  function(...) {
+    key <- rlang::hash(list(...))
+    if (is.null(cache[[key]])) {
+      cache[[key]] <- f(...)
+    }
+    cache[[key]]
+  }
+}
+
+slow <- function(x) { Sys.sleep(1); x^2 }
+fast <- memoise(slow)
+
+system.time(fast(4))    # about 1 second
+system.time(fast(4))    # essentially zero, served from cache
+```
+
+Look at the structure against everything so far. We make an empty environment to use as a cache, living on the heap. We return a wrapper function that, on each call, hashes its arguments, looks the hash up in the cache, and either returns the stored value or computes a fresh one and stores it. The wrapper closes over both `f` and `cache`. Each call to `memoise` mints a new, private cache. The real `memoise` package adds robustness (disk backends, expiry, better hashing) but the engine is exactly this. Caching, at bottom, is just a closure holding a table.
+
+::: {.callout-note}
+## This is the seed of two later chapters
+Hold this eight-line `memoise` in mind. In Chapter 7 we will see that a Shiny `reactive()` is essentially this same pattern, a closure wrapping a computation and caching its result, with the extra twist that the cache is invalidated automatically when inputs change. In Chapter 8 we will see that `targets` is again this pattern, with the cache living on disk and surviving across sessions. One idea, three scales.
+:::
+
+## Why this matters for your work
+
+Once the factory pattern is clear, you will start to see it in your own code, and reaching for it will make that code simpler. When you find yourself writing several near-identical functions that differ only in one or two settings, the right design is almost always a single factory that captures the settings in a closure and returns a clean function that never mentions them. This shows up when building a family of loss functions for an optimiser, a set of log-likelihoods over different priors, or a collection of themed plotting or table-formatting helpers for a report. The configuration goes into the closure; the interface stays simple.
+
+## What you can now predict
+
+- Why two functions with the same body can behave differently.
+- Why a counter built from a closure keeps its own private, persistent state.
+- Why all the functions made in a naive loop end up sharing one value, and how to fix it.
+- Why caching, reactivity, and pipeline tools are, underneath, the same closure-plus-table idea.
+
+## Exercises
+
+1. Modify `make_counter()` to accept a `by` argument so the step size is configurable, and add a `history()` method that returns every value the counter has ever held.
+
+2. Write `throttle(f, n)`, returning a wrapped version of `f` that actually calls `f` only on every n-th invocation and returns `NULL` the rest of the time. Use only closures, no extra packages.
+
+3. Extend the eight-line `memoise` so that cache entries expire after a fixed wall-clock duration. Where, physically, does the expiry time for each entry live? What goes in the cache environment now, and what stays in the closure?
+
+4. Predict the output of the loop trap example before running it, then fix it two different ways: once with `lapply`, and once by keeping the `for` loop but forcing a fresh binding per iteration with `local()`. Explain, in terms of environments, why each fix works.

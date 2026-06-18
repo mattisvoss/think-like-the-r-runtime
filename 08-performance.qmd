@@ -1,0 +1,137 @@
+---
+title: "Performance"
+---
+
+R has a reputation for being slow. The truth is more useful: R is slow when you fight its memory model and fast when you work with it, and the difference can be a factor of thousands on the very same calculation. This chapter cashes in the foundations from Chapter 1. Copy-on-modify is pointers and reference counts. Vectorisation is the cache and the CPU loop. The three layers of caching in the R world are the one idea from Chapter 3 at three timescales.
+
+## Copy-on-modify
+
+R appears to copy a value whenever you assign it to a new name. Physically, it usually does not, and the reason is the pointer picture from Chapter 1. The runtime keeps, for each value, a count of how many names point to it. As long as only one name points to a value, R can modify it in place. The instant a second name points to the same value, the next attempt to modify it through either name forces a real copy first, so the other name is left untouched.
+
+```r
+library(lobstr)
+
+x <- 1:1e7
+obj_addr(x)              # the address of the value on the heap
+
+y <- x                   # no data is copied; y points at the same value
+obj_addr(y)              # identical address to x
+
+y[1] <- 99               # NOW the copy happens, to protect x
+obj_addr(y)              # a new address
+obj_addr(x)              # unchanged
+```
+
+This is exactly the locker-and-sticky-note from Chapter 1. `y <- x` copied the note, not the locker. Only when you tried to change the contents through `y` did R duplicate the locker so that `x` would still see the original. The reference count is how R knows whether duplication is necessary: one pointer means safe to edit in place, more than one means copy first.
+
+The sharp practical consequence is the most common performance mistake in R: growing a vector in a loop.
+
+```r
+# Bad: each iteration may copy the whole vector so far.
+x <- c()
+for (i in 1:10000) x <- c(x, i^2)        # roughly n-squared work
+
+# Good: allocate once, then fill in place.
+x <- numeric(10000)
+for (i in 1:10000) x[i] <- i^2           # linear work
+
+# Best: no R-level loop at all.
+x <- (1:10000)^2                          # one operation, run in C
+```
+
+The bad version is slow not because R is interpreted but because `c(x, i^2)` keeps creating a new, longer vector and, since `x` still points at the old one, copying everything across each time. Pre-allocating means there is a single value with a single pointer, so each `x[i] <- ...` edits it in place with no copy.
+
+## Why vectorisation is fast
+
+When you write `x + y` on two numeric vectors, R does not run a loop in the interpreter. It calls into compiled C code that walks the two arrays in tight machine instructions, the CPU loop from Chapter 1, and the cost of the R-level interpretation (parsing the expression, dispatching `+`) is paid once for the whole vector rather than once per element.
+
+There is a second, deeper reason, and it is the cache. An R numeric vector is stored as its elements laid out *contiguously* in memory. When the CPU processes it, every expensive trip to RAM pulls in a whole cache line of 64 bytes, eight neighbouring doubles, all of which are about to be used. The hardware's bet from Chapter 1 pays off on every line. A pointer-chasing alternative, where each number sits in a separate object somewhere on the heap, loses that bet on every access and spends most of its time waiting on memory.
+
+So the well-worn advice to "vectorise" is really two wins stacked together: you pay the interpreter's overhead once instead of a million times, and you let the cache work for you instead of against you.
+
+::: {.callout-important}
+## Key idea: a rule of thumb you can now justify
+If you can read a function's body by printing it, it runs in the interpreter and will be slow in a tight loop. If its body is `.Primitive(...)`, `.Internal(...)`, or `.Call(...)`, it runs in C and will be fast over a whole vector. Vectorising means handing the inner loop to C and laying your data out contiguously so the cache cooperates. Both halves come straight from Chapter 1.
+:::
+
+```r
+`+`
+# function (e1, e2)  .Primitive("+")        run entirely in C
+
+sum
+# function (..., na.rm = FALSE)  .Primitive("sum")
+
+mean
+# function (x, ...)  UseMethod("mean")      dispatches, then C
+```
+
+## Three layers of memoisation
+
+Caching shows up at three natural scales in the R world, and they are the same idea, a cache plus an invalidation rule, applied at growing scope. You met the engine in Chapter 3; here are its three homes.
+
+**Function-call memoisation**, via `memoise::memoise` or your eight-line version. The cache is an environment captured in a closure, living in memory. It lasts only for the current R session. Use it for a slow pure function called repeatedly with the same arguments, which is common in Shiny when an expensive result depends on a small set of selectable inputs.
+
+**Reactive caching**, via `shiny::reactive` and `shiny::bindCache`. The cache lives in the reactive node, and invalidation is automatic through the reactive graph of Chapter 7. It is scoped to a session, or to the whole application with `bindCache(cache = "app")`.
+
+**Pipeline memoisation**, via `targets`. The cache lives on disk, keyed by a hash of the target's command, its dependencies, and its inputs. It survives across R sessions, across machines if you share the store, and across time. Invalidation is automatic through the pipeline graph.
+
+::: {.callout-note}
+## One idea, three clocks
+In-closure cache, in-session and gone when R exits. Reactive cache, settled within a session in milliseconds. Pipeline cache, on disk and good for months. The art is matching the layer to the lifetime of the work. Caching a one-millisecond function on disk wastes more time on input-output than it saves; trying to use an in-memory cache for a six-hour model fit means recomputing it every time R restarts.
+:::
+
+## Concurrency: `future` and `promises`
+
+R is single-threaded: one CPU loop, one thing at a time. To run work in parallel across cores or machines, or simply off to the side so a Shiny session stays responsive, use the `future` framework.
+
+```r
+library(future)
+library(promises)
+
+plan(multisession)             # run futures in background R processes
+
+f <- future({
+  Sys.sleep(3)
+  "done"
+})
+
+# The current session is free to keep working here.
+value(f)                        # blocks only when you finally need the result
+```
+
+Inside Shiny, the `promises` package provides a then-style operator, `%...>%`, so an output can be declared as "render the result of this future when it finishes, without blocking the session in the meantime".
+
+```r
+output$plot <- renderPlot({
+  future({ slow_computation(input$x) }) %...>% plot()
+})
+```
+
+A word of warning about vocabulary. The word *promise* here is not the same as the promise from Chapter 4. There it meant the unevaluated-expression mechanism behind lazy evaluation. Here it means a value that will be ready later, the concurrency sense familiar from JavaScript. R reuses the word for two different ideas. Context disambiguates, but the collision is real, so name your variables with care.
+
+## Three rules for Shiny performance
+
+Everything above condenses into three operational rules.
+
+**Pre-allocate.** Never grow a vector inside a reactive block. If you are, you have almost certainly missed a vectorised primitive that would do the whole thing at once.
+
+**Push heavy CPU off the main thread.** Anything taking more than about a tenth of a second belongs in a `future`, so the session stays responsive. Fill the visual gap with a spinner from `shinycssloaders`.
+
+**Cache at the right layer.** Per-session transient results go in reactives. Results shared across sessions go in `bindCache(cache = "app")`. Results that must survive a restart go in `memoise` with a disk backend, or as a `targets` stage if they are part of a pipeline.
+
+## What you can now predict
+
+- Why `y <- x` is instant even for a huge `x`, and exactly when the hidden copy finally happens.
+- Why growing a vector in a loop is quadratic, and why pre-allocation fixes it.
+- Why a vectorised operation beats an R loop twice over, in interpreter overhead and in cache behaviour.
+- Which of the three caching layers a given computation belongs in, from how long its result needs to live.
+
+## Exercises
+
+1. Use `lobstr::obj_addr` and `tracemem()` to demonstrate copy-on-modify in three cases: assigning a vector to a new name, then modifying one element of the new vector, then modifying an element via `data.table`'s `:=` operator instead of base assignment. Explain each address change, or lack of one, using reference counts.
+
+2. Time the three vector-building approaches (`c()` in a loop, pre-allocate then fill, and the fully vectorised form) for a vector of length one million. Plot the three timings and explain the ranking from this chapter.
+
+3. Take a genuinely slow pure function, a bootstrap with many resamples is ideal, and wrap it in `memoise::memoise()` with a filesystem backend. Re-run it from a fresh R session and confirm the second call is instant. Which of the three caching layers did you just use, and why was a disk backend necessary?
+
+4. In a small Shiny app, make a slow plot render asynchronously with `future` and `promises`, and confirm the rest of the app stays responsive while it computes. Then explain, using the single-threaded model, what would have happened without the future.
